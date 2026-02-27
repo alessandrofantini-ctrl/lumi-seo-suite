@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from db.supabase import supabase
+from supabase import supabase
 from services.scraper import scrape_client_deep
 from services.openai_service import generate_profile_from_url
 
