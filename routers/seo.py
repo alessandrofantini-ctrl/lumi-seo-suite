@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from db.supabase import supabase
+from supabase import supabase
 from services.scraper import scrape_site_content, build_serp_snapshot, aggregate_competitor_insights
 from services.serp import get_serp_data
 from services.openai_service import generate_seo_brief
