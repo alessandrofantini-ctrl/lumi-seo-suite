@@ -42,6 +42,12 @@ class AutoGenerateRequest(BaseModel):
 class KeywordRequest(BaseModel):
     keyword: str
 
+class KeywordBulkRequest(BaseModel):
+    keywords: list[str]
+
+class KeywordStatusUpdate(BaseModel):
+    status: str  # backlog | planned | brief_done | written | published
+
 # ══════════════════════════════════════════════
 #  ROUTE CLIENTI
 # ══════════════════════════════════════════════
@@ -151,6 +157,49 @@ def add_keyword(client_id: str, data: KeywordRequest):
         "client_id": client_id,
         "keyword": data.keyword,
     }).execute()
+    return res.data[0]
+
+
+@router.post("/{client_id}/keywords/bulk")
+def bulk_add_keywords(client_id: str, data: KeywordBulkRequest):
+    """Importa una lista di keyword, saltando i duplicati."""
+    existing = (
+        supabase.table("keyword_history")
+        .select("keyword")
+        .eq("client_id", client_id)
+        .execute()
+    )
+    existing_set = {r["keyword"].lower() for r in existing.data}
+
+    to_insert = [
+        {"client_id": client_id, "keyword": kw.strip(), "status": "backlog"}
+        for kw in data.keywords
+        if kw.strip() and kw.strip().lower() not in existing_set
+    ]
+
+    if not to_insert:
+        return {"added": 0, "skipped": len(data.keywords)}
+
+    res = supabase.table("keyword_history").insert(to_insert).execute()
+    return {"added": len(res.data), "skipped": len(data.keywords) - len(to_insert)}
+
+
+@router.patch("/{client_id}/keywords/{keyword_id}")
+def update_keyword_status(client_id: str, keyword_id: str, data: KeywordStatusUpdate):
+    """Aggiorna lo stato di una keyword."""
+    valid = {"backlog", "planned", "brief_done", "written", "published"}
+    if data.status not in valid:
+        raise HTTPException(status_code=400, detail=f"Status non valido. Valori: {valid}")
+
+    res = (
+        supabase.table("keyword_history")
+        .update({"status": data.status})
+        .eq("id", keyword_id)
+        .eq("client_id", client_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Keyword non trovata")
     return res.data[0]
 
 
