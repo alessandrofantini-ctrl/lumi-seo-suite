@@ -23,6 +23,7 @@ class ClientCreate(BaseModel):
     target_audience: Optional[str] = ""
     geo: Optional[str] = ""
     notes: Optional[str] = ""
+    gsc_property: Optional[str] = ""
 
 class ClientUpdate(BaseModel):
     url: Optional[str] = None
@@ -34,6 +35,7 @@ class ClientUpdate(BaseModel):
     target_audience: Optional[str] = None
     geo: Optional[str] = None
     notes: Optional[str] = None
+    gsc_property: Optional[str] = None
 
 class AutoGenerateRequest(BaseModel):
     url: str
@@ -215,3 +217,66 @@ def clear_keywords(client_id: str):
     """Svuota lo storico keyword di un cliente."""
     supabase.table("keyword_history").delete().eq("client_id", client_id).execute()
     return {"cleared": True}
+
+
+# ══════════════════════════════════════════════
+#  GOOGLE SEARCH CONSOLE SYNC
+# ══════════════════════════════════════════════
+
+@router.post("/{client_id}/gsc-sync")
+def gsc_sync(client_id: str):
+    """Sincronizza i dati di Google Search Console per un cliente."""
+    from services.gsc import fetch_gsc_queries
+
+    client = supabase.table("clients").select("gsc_property").eq("id", client_id).single().execute()
+    if not client.data or not client.data.get("gsc_property"):
+        raise HTTPException(
+            status_code=400,
+            detail="gsc_property non configurata per questo cliente. Inseriscila nel profilo."
+        )
+
+    try:
+        rows = fetch_gsc_queries(client.data["gsc_property"])
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore GSC: {str(e)}")
+
+    if not rows:
+        return {"synced": 0, "added": 0}
+
+    existing = (
+        supabase.table("keyword_history")
+        .select("id, keyword")
+        .eq("client_id", client_id)
+        .execute()
+    )
+    existing_map = {r["keyword"].lower(): r["id"] for r in existing.data}
+
+    now = datetime.now().isoformat()
+    updated = 0
+    added = 0
+
+    for row in rows:
+        query = row["query"]
+        gsc_data = {
+            "impressions": row["impressions"],
+            "clicks": row["clicks"],
+            "position": row["position"],
+            "ctr": row["ctr"],
+            "gsc_updated_at": now,
+        }
+
+        if query.lower() in existing_map:
+            supabase.table("keyword_history").update(gsc_data).eq("id", existing_map[query.lower()]).execute()
+            updated += 1
+        else:
+            supabase.table("keyword_history").insert({
+                "client_id": client_id,
+                "keyword": query,
+                "status": "backlog",
+                **gsc_data,
+            }).execute()
+            added += 1
+
+    return {"synced": updated, "added": added}

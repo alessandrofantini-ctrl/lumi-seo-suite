@@ -7,3 +7,5 @@ beautifulsoup4==4.12.3
 pydantic==2.7.4
 python-dotenv==1.0.1
 httpx==0.27.0
+google-api-python-client==2.131.0
+google-auth==2.29.0
