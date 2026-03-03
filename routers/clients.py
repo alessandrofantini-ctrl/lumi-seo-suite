@@ -47,8 +47,11 @@ class KeywordRequest(BaseModel):
 class KeywordBulkRequest(BaseModel):
     keywords: list[str]
 
-class KeywordStatusUpdate(BaseModel):
-    status: str  # backlog | planned | brief_done | written | published
+class KeywordUpdate(BaseModel):
+    status:   Optional[str] = None  # backlog | planned | brief_done | written | published
+    cluster:  Optional[str] = None
+    intent:   Optional[str] = None  # informativo | commerciale | navigazionale | transazionale
+    priority: Optional[str] = None  # alta | media | bassa
 
 # ══════════════════════════════════════════════
 #  ROUTE CLIENTI
@@ -73,7 +76,6 @@ def get_client(client_id: str, _user=Depends(get_current_user)):
         .select("*")
         .eq("client_id", client_id)
         .order("created_at", desc=True)
-        .limit(50)
         .execute()
     )
 
@@ -191,15 +193,26 @@ def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depends(ge
 
 
 @router.patch("/{client_id}/keywords/{keyword_id}")
-def update_keyword_status(client_id: str, keyword_id: str, data: KeywordStatusUpdate, _user=Depends(get_current_user)):
-    """Aggiorna lo stato di una keyword."""
-    valid = {"backlog", "planned", "brief_done", "written", "published"}
-    if data.status not in valid:
-        raise HTTPException(status_code=400, detail=f"Status non valido. Valori: {valid}")
+def update_keyword(client_id: str, keyword_id: str, data: KeywordUpdate, _user=Depends(get_current_user)):
+    """Aggiorna status, cluster, intent e/o priority di una keyword."""
+    valid_status   = {"backlog", "planned", "brief_done", "written", "published"}
+    valid_intent   = {"informativo", "commerciale", "navigazionale", "transazionale"}
+    valid_priority = {"alta", "media", "bassa"}
+
+    if data.status   and data.status   not in valid_status:
+        raise HTTPException(status_code=400, detail=f"Status non valido. Valori: {valid_status}")
+    if data.intent   and data.intent   not in valid_intent:
+        raise HTTPException(status_code=400, detail=f"Intent non valido. Valori: {valid_intent}")
+    if data.priority and data.priority not in valid_priority:
+        raise HTTPException(status_code=400, detail=f"Priority non valida. Valori: {valid_priority}")
+
+    payload = {k: v for k, v in data.model_dump().items() if v is not None}
+    if not payload:
+        raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
 
     res = (
         supabase.table("keyword_history")
-        .update({"status": data.status})
+        .update(payload)
         .eq("id", keyword_id)
         .eq("client_id", client_id)
         .execute()
