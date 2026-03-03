@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import Optional
 from database import supabase
@@ -47,7 +47,12 @@ def get_markets():
 
 
 @router.post("/analyse")
-async def analyse(data: SeoAnalysisRequest, _user=Depends(get_current_user)):
+async def analyse(
+    data: SeoAnalysisRequest,
+    _user=Depends(get_current_user),
+    x_openai_key: Optional[str] = Header(default=None),
+    x_serpapi_key: Optional[str] = Header(default=None),
+):
     """
     Esegue l'analisi SEO completa:
     1. Recupera SERP
@@ -65,6 +70,7 @@ async def analyse(data: SeoAnalysisRequest, _user=Depends(get_current_user)):
         gl=market_params["gl"],
         hl=market_params["hl"],
         domain=market_params["domain"],
+        api_key=x_serpapi_key,
     )
     if not serp_json or "organic_results" not in serp_json:
         raise HTTPException(status_code=502, detail="Nessun risultato SERP. Verifica la SerpAPI key.")
@@ -129,6 +135,7 @@ async def analyse(data: SeoAnalysisRequest, _user=Depends(get_current_user)):
         serp_snapshot=serp_snapshot,
         competitor_results=competitor_results,
         aggregated=agg,
+        api_key=x_openai_key,
     )
 
     # 6 — Salva su Supabase

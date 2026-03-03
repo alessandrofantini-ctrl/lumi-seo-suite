@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -128,13 +128,17 @@ def delete_client(client_id: str, _user=Depends(get_current_user)):
 # ══════════════════════════════════════════════
 
 @router.post("/auto-generate")
-async def auto_generate_profile(data: AutoGenerateRequest, _user=Depends(get_current_user)):
+async def auto_generate_profile(
+    data: AutoGenerateRequest,
+    _user=Depends(get_current_user),
+    x_openai_key: Optional[str] = Header(default=None),
+):
     """Scrapa il sito e genera automaticamente il profilo cliente con GPT."""
     pages_data = scrape_client_deep(data.url, keyword="", max_pages=6)
     if not pages_data:
         raise HTTPException(status_code=422, detail="Impossibile leggere il sito. Prova a inserire i dati manualmente.")
 
-    profile = await generate_profile_from_url(data.url, pages_data)
+    profile = await generate_profile_from_url(data.url, pages_data, api_key=x_openai_key)
     return profile
 
 

@@ -12,14 +12,14 @@ def build_session():
 
 HTTP = build_session()
 
-def get_serp_data(query: str, gl: str, hl: str, domain: str) -> dict | None:
-    api_key = os.getenv("SERPAPI_KEY")
-    if not api_key:
-        raise RuntimeError("SERPAPI_KEY non configurata sul server")
+def get_serp_data(query: str, gl: str, hl: str, domain: str, api_key: str | None = None) -> dict | None:
+    key = api_key or os.getenv("SERPAPI_KEY")
+    if not key:
+        raise RuntimeError("SerpAPI key non configurata. Inseriscila nelle Impostazioni.")
     params = {
         "engine":        "google",
         "q":             query,
-        "api_key":       api_key,
+        "api_key":       key,
         "hl":            hl,
         "gl":            gl,
         "google_domain": domain,
