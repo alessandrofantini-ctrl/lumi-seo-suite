@@ -1,3 +1,4 @@
+import os
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
@@ -11,7 +12,10 @@ def build_session():
 
 HTTP = build_session()
 
-def get_serp_data(query: str, api_key: str, gl: str, hl: str, domain: str) -> dict | None:
+def get_serp_data(query: str, gl: str, hl: str, domain: str) -> dict | None:
+    api_key = os.getenv("SERPAPI_KEY")
+    if not api_key:
+        raise RuntimeError("SERPAPI_KEY non configurata sul server")
     params = {
         "engine":        "google",
         "q":             query,

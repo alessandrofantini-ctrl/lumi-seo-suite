@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from database import supabase
 from services.openai_service import generate_article
+from auth import get_current_user
 
 router = APIRouter()
 
@@ -17,14 +18,13 @@ class ArticleRequest(BaseModel):
     target_page_url: Optional[str] = ""
     length: Optional[str] = "Long form"   # Standard | Long form | Authority guide
     creativity: Optional[float] = 0.35
-    openai_api_key: str
 
 # ══════════════════════════════════════════════
 #  ROUTE REDATTORE
 # ══════════════════════════════════════════════
 
 @router.post("/generate")
-async def generate(data: ArticleRequest):
+async def generate(data: ArticleRequest, _user=Depends(get_current_user)):
     """
     Genera un articolo SEO completo a partire da un brief.
     Il brief può essere passato come testo o caricato da Supabase tramite brief_id.
@@ -50,7 +50,6 @@ async def generate(data: ArticleRequest):
         target_page_url=data.target_page_url,
         length=data.length,
         creativity=data.creativity,
-        openai_api_key=data.openai_api_key,
     )
 
     # Salva l'articolo nel brief su Supabase
