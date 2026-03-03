@@ -260,7 +260,7 @@ def gsc_sync(client_id: str, _user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Errore GSC: {str(e)}")
 
     if not rows:
-        return {"synced": 0, "added": 0}
+        return {"synced": 0, "total": 0}
 
     existing = (
         supabase.table("keyword_history")
@@ -272,28 +272,20 @@ def gsc_sync(client_id: str, _user=Depends(get_current_user)):
 
     now = datetime.now().isoformat()
     updated = 0
-    added = 0
 
+    # Aggiorna solo le keyword già presenti — il GSC arricchisce i dati,
+    # non importa nuove query. L'elenco target viene gestito manualmente.
     for row in rows:
         query = row["query"]
-        gsc_data = {
-            "impressions": row["impressions"],
-            "clicks": row["clicks"],
-            "position": row["position"],
-            "ctr": row["ctr"],
+        if query.lower() not in existing_map:
+            continue
+        supabase.table("keyword_history").update({
+            "impressions":   row["impressions"],
+            "clicks":        row["clicks"],
+            "position":      row["position"],
+            "ctr":           row["ctr"],
             "gsc_updated_at": now,
-        }
+        }).eq("id", existing_map[query.lower()]).execute()
+        updated += 1
 
-        if query.lower() in existing_map:
-            supabase.table("keyword_history").update(gsc_data).eq("id", existing_map[query.lower()]).execute()
-            updated += 1
-        else:
-            supabase.table("keyword_history").insert({
-                "client_id": client_id,
-                "keyword": query,
-                "status": "backlog",
-                **gsc_data,
-            }).execute()
-            added += 1
-
-    return {"synced": updated, "added": added}
+    return {"synced": updated, "total": len(existing_map)}
