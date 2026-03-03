@@ -1,6 +1,13 @@
+import os
 import re
 import json
 from openai import AsyncOpenAI
+
+def _openai_client() -> AsyncOpenAI:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY non configurata sul server")
+    return AsyncOpenAI(api_key=key)
 
 # ══════════════════════════════════════════════
 #  HELPERS
@@ -21,8 +28,8 @@ def get_word_target(label: str) -> str:
 #  AUTO-GENERAZIONE PROFILO CLIENTE
 # ══════════════════════════════════════════════
 
-async def generate_profile_from_url(base_url: str, pages_data: list, openai_api_key: str) -> dict:
-    client = AsyncOpenAI(api_key=openai_api_key)
+async def generate_profile_from_url(base_url: str, pages_data: list) -> dict:
+    client = _openai_client()
 
     all_text_parts = []
     for label, page in pages_data:
@@ -88,9 +95,8 @@ async def generate_seo_brief(
     serp_snapshot: dict,
     competitor_results: list,
     aggregated: dict,
-    openai_api_key: str,
 ) -> str:
-    client = AsyncOpenAI(api_key=openai_api_key)
+    client = _openai_client()
     target_lang = market_params["hl"]
 
     competitor_compact = []
@@ -189,9 +195,8 @@ async def generate_article(
     target_page_url: str,
     length: str,
     creativity: float,
-    openai_api_key: str,
 ) -> str:
-    client = AsyncOpenAI(api_key=openai_api_key)
+    client = _openai_client()
     word_target = get_word_target(length)
 
     system_prompt = """

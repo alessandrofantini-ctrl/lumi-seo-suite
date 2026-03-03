@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from database import supabase
 from services.scraper import scrape_client_deep
 from services.openai_service import generate_profile_from_url
+from auth import get_current_user
 
 router = APIRouter()
 
@@ -39,7 +40,6 @@ class ClientUpdate(BaseModel):
 
 class AutoGenerateRequest(BaseModel):
     url: str
-    openai_api_key: str
 
 class KeywordRequest(BaseModel):
     keyword: str
@@ -55,14 +55,14 @@ class KeywordStatusUpdate(BaseModel):
 # ══════════════════════════════════════════════
 
 @router.get("/")
-def get_all_clients():
+def get_all_clients(_user=Depends(get_current_user)):
     """Restituisce tutti i clienti."""
     res = supabase.table("clients").select("*").order("name").execute()
     return res.data
 
 
 @router.get("/{client_id}")
-def get_client(client_id: str):
+def get_client(client_id: str, _user=Depends(get_current_user)):
     """Restituisce un singolo cliente con il suo storico keyword."""
     client = supabase.table("clients").select("*").eq("id", client_id).single().execute()
     if not client.data:
@@ -94,7 +94,7 @@ def get_client(client_id: str):
 
 
 @router.post("/")
-def create_client(data: ClientCreate):
+def create_client(data: ClientCreate, _user=Depends(get_current_user)):
     """Crea un nuovo cliente."""
     existing = supabase.table("clients").select("id").eq("name", data.name).execute()
     if existing.data:
@@ -105,7 +105,7 @@ def create_client(data: ClientCreate):
 
 
 @router.put("/{client_id}")
-def update_client(client_id: str, data: ClientUpdate):
+def update_client(client_id: str, data: ClientUpdate, _user=Depends(get_current_user)):
     """Aggiorna un cliente esistente."""
     payload = {k: v for k, v in data.model_dump().items() if v is not None}
     payload["updated_at"] = datetime.now().isoformat()
@@ -117,7 +117,7 @@ def update_client(client_id: str, data: ClientUpdate):
 
 
 @router.delete("/{client_id}")
-def delete_client(client_id: str):
+def delete_client(client_id: str, _user=Depends(get_current_user)):
     """Elimina un cliente e tutto il suo storico (cascade)."""
     supabase.table("clients").delete().eq("id", client_id).execute()
     return {"deleted": True}
@@ -128,13 +128,13 @@ def delete_client(client_id: str):
 # ══════════════════════════════════════════════
 
 @router.post("/auto-generate")
-async def auto_generate_profile(data: AutoGenerateRequest):
+async def auto_generate_profile(data: AutoGenerateRequest, _user=Depends(get_current_user)):
     """Scrapa il sito e genera automaticamente il profilo cliente con GPT."""
     pages_data = scrape_client_deep(data.url, keyword="", max_pages=6)
     if not pages_data:
         raise HTTPException(status_code=422, detail="Impossibile leggere il sito. Prova a inserire i dati manualmente.")
 
-    profile = await generate_profile_from_url(data.url, pages_data, data.openai_api_key)
+    profile = await generate_profile_from_url(data.url, pages_data)
     return profile
 
 
@@ -143,7 +143,7 @@ async def auto_generate_profile(data: AutoGenerateRequest):
 # ══════════════════════════════════════════════
 
 @router.post("/{client_id}/keywords")
-def add_keyword(client_id: str, data: KeywordRequest):
+def add_keyword(client_id: str, data: KeywordRequest, _user=Depends(get_current_user)):
     """Aggiunge una keyword allo storico del cliente."""
     existing = (
         supabase.table("keyword_history")
@@ -163,7 +163,7 @@ def add_keyword(client_id: str, data: KeywordRequest):
 
 
 @router.post("/{client_id}/keywords/bulk")
-def bulk_add_keywords(client_id: str, data: KeywordBulkRequest):
+def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depends(get_current_user)):
     """Importa una lista di keyword, saltando i duplicati."""
     existing = (
         supabase.table("keyword_history")
@@ -187,7 +187,7 @@ def bulk_add_keywords(client_id: str, data: KeywordBulkRequest):
 
 
 @router.patch("/{client_id}/keywords/{keyword_id}")
-def update_keyword_status(client_id: str, keyword_id: str, data: KeywordStatusUpdate):
+def update_keyword_status(client_id: str, keyword_id: str, data: KeywordStatusUpdate, _user=Depends(get_current_user)):
     """Aggiorna lo stato di una keyword."""
     valid = {"backlog", "planned", "brief_done", "written", "published"}
     if data.status not in valid:
@@ -206,14 +206,14 @@ def update_keyword_status(client_id: str, keyword_id: str, data: KeywordStatusUp
 
 
 @router.delete("/{client_id}/keywords/{keyword_id}")
-def delete_keyword(client_id: str, keyword_id: str):
+def delete_keyword(client_id: str, keyword_id: str, _user=Depends(get_current_user)):
     """Rimuove una keyword dallo storico."""
     supabase.table("keyword_history").delete().eq("id", keyword_id).execute()
     return {"deleted": True}
 
 
 @router.delete("/{client_id}/keywords")
-def clear_keywords(client_id: str):
+def clear_keywords(client_id: str, _user=Depends(get_current_user)):
     """Svuota lo storico keyword di un cliente."""
     supabase.table("keyword_history").delete().eq("client_id", client_id).execute()
     return {"cleared": True}
@@ -224,7 +224,7 @@ def clear_keywords(client_id: str):
 # ══════════════════════════════════════════════
 
 @router.post("/{client_id}/gsc-sync")
-def gsc_sync(client_id: str):
+def gsc_sync(client_id: str, _user=Depends(get_current_user)):
     """Sincronizza i dati di Google Search Console per un cliente."""
     from services.gsc import fetch_gsc_queries
 

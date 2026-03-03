@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from database import supabase
@@ -6,6 +6,7 @@ from services.scraper import scrape_site_content, build_serp_snapshot, aggregate
 from services.serp import get_serp_data
 from services.openai_service import generate_seo_brief
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from auth import get_current_user
 
 router = APIRouter()
 
@@ -33,8 +34,6 @@ class SeoAnalysisRequest(BaseModel):
     intent: Optional[str] = "Informativo"
     max_competitors: Optional[int] = 6
     include_schema: Optional[bool] = True
-    openai_api_key: str
-    serp_api_key: str
     save_brief: Optional[bool] = True
 
 # ══════════════════════════════════════════════
@@ -48,7 +47,7 @@ def get_markets():
 
 
 @router.post("/analyse")
-async def analyse(data: SeoAnalysisRequest):
+async def analyse(data: SeoAnalysisRequest, _user=Depends(get_current_user)):
     """
     Esegue l'analisi SEO completa:
     1. Recupera SERP
@@ -63,7 +62,6 @@ async def analyse(data: SeoAnalysisRequest):
     # 1 — SERP
     serp_json = get_serp_data(
         query=data.keyword,
-        api_key=data.serp_api_key,
         gl=market_params["gl"],
         hl=market_params["hl"],
         domain=market_params["domain"],
@@ -131,7 +129,6 @@ async def analyse(data: SeoAnalysisRequest):
         serp_snapshot=serp_snapshot,
         competitor_results=competitor_results,
         aggregated=agg,
-        openai_api_key=data.openai_api_key,
     )
 
     # 6 — Salva su Supabase
@@ -174,7 +171,7 @@ async def analyse(data: SeoAnalysisRequest):
 
 
 @router.get("/briefs/{brief_id}")
-def get_brief(brief_id: str):
+def get_brief(brief_id: str, _user=Depends(get_current_user)):
     """Recupera un brief salvato."""
     res = supabase.table("briefs").select("*").eq("id", brief_id).single().execute()
     if not res.data:
@@ -183,7 +180,7 @@ def get_brief(brief_id: str):
 
 
 @router.get("/briefs")
-def get_all_briefs(client_id: Optional[str] = None):
+def get_all_briefs(client_id: Optional[str] = None, _user=Depends(get_current_user)):
     """Recupera tutti i brief, opzionalmente filtrati per cliente."""
     query = supabase.table("briefs").select("id, keyword, market, intent, created_at, client_id")
     if client_id:
