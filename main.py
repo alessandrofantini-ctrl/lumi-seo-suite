@@ -14,7 +14,7 @@ app.add_middleware(
     allow_origins=["*"],  # in produzione sostituire con l'URL Vercel
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type", "X-OpenAI-Key", "X-SerpAPI-Key"],
+    allow_headers=["*"],
 )
 
 app.include_router(clients.router, prefix="/api/clients", tags=["Clienti"])
