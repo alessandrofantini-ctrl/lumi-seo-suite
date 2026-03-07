@@ -50,6 +50,7 @@ backlog → planned → brief_done → written → published
 ```
 keyword, status, cluster, intent, priority
 impressions, clicks, position, ctr, gsc_updated_at
+position_prev, position_updated_at   ← aggiunto in migration 004
 ```
 
 ### Valori intent validi
@@ -69,6 +70,7 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 2 | GSC sync aggiorna SOLO keyword esistenti, non importa nuove query | `docs/adr/002-gsc-sync-update-only.md` |
 | 3 | JWT verificato con Supabase SDK (non decode HS256 manuale) | commit `9d433cc` |
 | 4 | CORS `allow_origins=["*"]` — da restringere all'URL Vercel in produzione | `main.py:14` |
+| 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 
 ## Come aggiungere un endpoint
 
