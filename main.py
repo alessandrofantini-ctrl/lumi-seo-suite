@@ -1,6 +1,15 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import clients, seo, writer
+
+# DataForSEO — credenziali lato server (non via header HTTP)
+# Impostare come variabili d'ambiente in Render:
+#   DATAFORSEO_LOGIN    → login account DataForSEO
+#   DATAFORSEO_PASSWORD → password account DataForSEO
+DATAFORSEO_LOGIN    = os.getenv("DATAFORSEO_LOGIN", "")
+DATAFORSEO_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
 
 app = FastAPI(
     title="Lumi SEO Suite API",
