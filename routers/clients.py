@@ -4,7 +4,8 @@ import os
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from database import supabase
 from services.scraper import scrape_client_deep
 from services.openai_service import generate_profile_from_url
@@ -370,6 +371,90 @@ def gsc_sync(client_id: str, _user=Depends(get_current_user)):
         if prev is not None:
             payload["position_prev"] = prev
         supabase.table("keyword_history").update(payload).eq("id", kw_id).execute()
+
+        # Salva snapshot in keyword_position_history per storico trend
+        supabase.table("keyword_position_history").insert({
+            "keyword_id":  kw_id,
+            "client_id":   client_id,
+            "position":    row["position"],
+            "clicks":      row["clicks"],
+            "impressions": row["impressions"],
+            "ctr":         row["ctr"],
+            "recorded_at": now,
+        }).execute()
+
         updated += 1
 
     return {"synced": updated, "total": len(existing_map)}
+
+
+# ══════════════════════════════════════════════
+#  STORICO POSIZIONI (trend)
+# ══════════════════════════════════════════════
+
+@router.get("/{client_id}/keywords/{keyword_id}/history")
+def get_keyword_history(client_id: str, keyword_id: str, _user=Depends(get_current_user)):
+    """Ultimi 90 giorni di snapshot per una keyword singola."""
+    since = (datetime.utcnow() - timedelta(days=90)).isoformat()
+    res = (
+        supabase.table("keyword_position_history")
+        .select("position, clicks, impressions, ctr, recorded_at")
+        .eq("keyword_id", keyword_id)
+        .eq("client_id", client_id)
+        .gte("recorded_at", since)
+        .order("recorded_at", desc=False)
+        .execute()
+    )
+    return {"history": res.data}
+
+
+@router.get("/{client_id}/visibility-history")
+def get_visibility_history(client_id: str, _user=Depends(get_current_user)):
+    """
+    Visibilità aggregata del cliente — posizione media ponderata per impressioni
+    per ogni giorno di sync, ultimi 90 giorni.
+    """
+    since = (datetime.utcnow() - timedelta(days=90)).isoformat()
+    res = (
+        supabase.table("keyword_position_history")
+        .select("position, clicks, impressions, recorded_at")
+        .eq("client_id", client_id)
+        .gte("recorded_at", since)
+        .order("recorded_at", desc=False)
+        .execute()
+    )
+
+    if not res.data:
+        return {"history": []}
+
+    # Raggruppa per giorno (YYYY-MM-DD)
+    groups: dict[str, list] = defaultdict(list)
+    for row in res.data:
+        day = row["recorded_at"][:10]
+        groups[day].append(row)
+
+    history = []
+    for day in sorted(groups.keys()):
+        rows = groups[day]
+        total_clicks      = sum(r.get("clicks") or 0 for r in rows)
+        total_impressions = sum(r.get("impressions") or 0 for r in rows)
+
+        # Media posizione ponderata per impressioni (peso = 1 se impressions == 0 o null)
+        weighted_sum  = 0.0
+        weight_total  = 0.0
+        for r in rows:
+            imp = r.get("impressions") or 0
+            w   = imp if imp > 0 else 1
+            weighted_sum  += r["position"] * w
+            weight_total  += w
+
+        avg_pos = weighted_sum / weight_total if weight_total > 0 else 0.0
+
+        history.append({
+            "recorded_at":       day,
+            "avg_position":      round(avg_pos, 2),
+            "total_clicks":      total_clicks,
+            "total_impressions": total_impressions,
+        })
+
+    return {"history": history}

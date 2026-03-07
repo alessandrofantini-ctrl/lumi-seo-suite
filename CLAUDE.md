@@ -32,6 +32,9 @@ migrations/       → SQL da applicare manualmente in Supabase Dashboard → SQL
   001_keyword_status.sql
   002_gsc_integration.sql
   003_keyword_enhancements.sql
+  004_position_prev.sql
+  005_dataforseo.sql
+  006_position_history.sql
 docs/adr/         → Architecture Decision Records
 tests/            → test automatici (pytest)
 ```
@@ -42,6 +45,11 @@ tests/            → test automatici (pytest)
 - `clients`: profilo cliente (brand, tone_of_voice, usp, products_services, target_audience, geo, gsc_property, language_code, location_code)
 - `keyword_history`: keyword target con pipeline status + GSC metrics + cluster/intent/priority
 - `briefs`: brief SEO generati + eventuale articolo scritto
+- `keyword_position_history`: snapshot posizioni ad ogni GSC sync (migration 006)
+  - `keyword_id` → FK keyword_history | `client_id` → FK clients | `position`, `clicks`, `impressions`, `ctr`, `recorded_at`
+  - Inserito automaticamente da `gsc_sync` ad ogni sync riuscito
+  - Endpoint: `GET /api/clients/{id}/keywords/{kw_id}/history` (90gg, ordinato asc)
+  - Endpoint: `GET /api/clients/{id}/visibility-history` (posizione media ponderata per giorno, 90gg)
 
 ### Status pipeline keyword_history (ordinato)
 ```
@@ -74,6 +82,7 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 3 | JWT verificato con Supabase SDK (non decode HS256 manuale) | commit `9d433cc` |
 | 4 | CORS `allow_origins=["*"]` — da restringere all'URL Vercel in produzione | `main.py:14` |
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
+| 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
 
 ## Come aggiungere un endpoint
 
