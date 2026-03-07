@@ -1,3 +1,6 @@
+import logging
+import os
+
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import Optional
@@ -5,7 +8,10 @@ from datetime import datetime
 from database import supabase
 from services.scraper import scrape_client_deep
 from services.openai_service import generate_profile_from_url
+from services.dataforseo import get_search_volume
 from auth import get_current_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -25,6 +31,8 @@ class ClientCreate(BaseModel):
     geo: Optional[str] = ""
     notes: Optional[str] = ""
     gsc_property: Optional[str] = ""
+    language_code: Optional[str] = "it"
+    location_code: Optional[int] = 2380
 
 class ClientUpdate(BaseModel):
     url: Optional[str] = None
@@ -37,6 +45,8 @@ class ClientUpdate(BaseModel):
     geo: Optional[str] = None
     notes: Optional[str] = None
     gsc_property: Optional[str] = None
+    language_code: Optional[str] = None
+    location_code: Optional[int] = None
 
 class AutoGenerateRequest(BaseModel):
     url: str
@@ -149,7 +159,7 @@ async def auto_generate_profile(
 # ══════════════════════════════════════════════
 
 @router.post("/{client_id}/keywords")
-def add_keyword(client_id: str, data: KeywordRequest, _user=Depends(get_current_user)):
+async def add_keyword(client_id: str, data: KeywordRequest, _user=Depends(get_current_user)):
     """Aggiunge una keyword allo storico del cliente."""
     existing = (
         supabase.table("keyword_history")
@@ -165,11 +175,40 @@ def add_keyword(client_id: str, data: KeywordRequest, _user=Depends(get_current_
         "client_id": client_id,
         "keyword": data.keyword,
     }).execute()
-    return res.data[0]
+    record = res.data[0]
+
+    # DataForSEO — arricchimento volume di ricerca (silenzioso se credenziali assenti)
+    dfs_login    = os.getenv("DATAFORSEO_LOGIN", "")
+    dfs_password = os.getenv("DATAFORSEO_PASSWORD", "")
+    if dfs_login and dfs_password:
+        try:
+            client_row = (
+                supabase.table("clients")
+                .select("language_code, location_code")
+                .eq("id", client_id)
+                .single()
+                .execute()
+            )
+            lang = (client_row.data or {}).get("language_code") or "it"
+            loc  = (client_row.data or {}).get("location_code") or 2380
+            volumes = await get_search_volume([data.keyword], lang, loc, dfs_login, dfs_password)
+            vol = volumes.get(data.keyword)
+            if vol is not None:
+                now = datetime.now().isoformat()
+                supabase.table("keyword_history").update({
+                    "search_volume": vol,
+                    "volume_updated_at": now,
+                }).eq("id", record["id"]).execute()
+                record["search_volume"] = vol
+                record["volume_updated_at"] = now
+        except Exception as exc:
+            logger.warning("DataForSEO skip (singola): %s", exc)
+
+    return record
 
 
 @router.post("/{client_id}/keywords/bulk")
-def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depends(get_current_user)):
+async def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depends(get_current_user)):
     """Importa una lista di keyword, saltando i duplicati."""
     existing = (
         supabase.table("keyword_history")
@@ -189,7 +228,36 @@ def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depends(ge
         return {"added": 0, "skipped": len(data.keywords)}
 
     res = supabase.table("keyword_history").insert(to_insert).execute()
-    return {"added": len(res.data), "skipped": len(data.keywords) - len(to_insert)}
+    inserted = res.data
+
+    # DataForSEO — arricchimento volume in batch (silenzioso se credenziali assenti)
+    dfs_login    = os.getenv("DATAFORSEO_LOGIN", "")
+    dfs_password = os.getenv("DATAFORSEO_PASSWORD", "")
+    if dfs_login and dfs_password and inserted:
+        try:
+            client_row = (
+                supabase.table("clients")
+                .select("language_code, location_code")
+                .eq("id", client_id)
+                .single()
+                .execute()
+            )
+            lang = (client_row.data or {}).get("language_code") or "it"
+            loc  = (client_row.data or {}).get("location_code") or 2380
+            kws = [r["keyword"] for r in inserted]
+            volumes = await get_search_volume(kws, lang, loc, dfs_login, dfs_password)
+            now = datetime.now().isoformat()
+            for record in inserted:
+                vol = volumes.get(record["keyword"])
+                if vol is not None:
+                    supabase.table("keyword_history").update({
+                        "search_volume": vol,
+                        "volume_updated_at": now,
+                    }).eq("id", record["id"]).execute()
+        except Exception as exc:
+            logger.warning("DataForSEO skip (bulk): %s", exc)
+
+    return {"added": len(inserted), "skipped": len(data.keywords) - len(to_insert)}
 
 
 @router.patch("/{client_id}/keywords/{keyword_id}")
