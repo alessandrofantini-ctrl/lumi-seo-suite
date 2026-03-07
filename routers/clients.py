@@ -273,19 +273,35 @@ def gsc_sync(client_id: str, _user=Depends(get_current_user)):
     now = datetime.now().isoformat()
     updated = 0
 
+    # Recupera i valori attuali di position per storicizzarli in position_prev.
+    existing_positions = (
+        supabase.table("keyword_history")
+        .select("id, position")
+        .eq("client_id", client_id)
+        .execute()
+    )
+    position_map: dict[str, float | None] = {r["id"]: r.get("position") for r in existing_positions.data}
+
     # Aggiorna solo le keyword già presenti — il GSC arricchisce i dati,
     # non importa nuove query. L'elenco target viene gestito manualmente.
     for row in rows:
         query = row["query"]
         if query.lower() not in existing_map:
             continue
-        supabase.table("keyword_history").update({
-            "impressions":   row["impressions"],
-            "clicks":        row["clicks"],
-            "position":      row["position"],
-            "ctr":           row["ctr"],
+        kw_id = existing_map[query.lower()]
+        payload: dict = {
+            "impressions":    row["impressions"],
+            "clicks":         row["clicks"],
+            "position":       row["position"],
+            "ctr":            row["ctr"],
             "gsc_updated_at": now,
-        }).eq("id", existing_map[query.lower()]).execute()
+            "position_updated_at": now,
+        }
+        # Salva la posizione precedente solo se ne esisteva già una.
+        prev = position_map.get(kw_id)
+        if prev is not None:
+            payload["position_prev"] = prev
+        supabase.table("keyword_history").update(payload).eq("id", kw_id).execute()
         updated += 1
 
     return {"synced": updated, "total": len(existing_map)}
