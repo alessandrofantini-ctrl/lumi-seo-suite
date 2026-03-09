@@ -24,17 +24,16 @@ class MigrationResult(BaseModel):
     old_inlinks: int
     new_url: Optional[str] = None
     new_title: Optional[str] = None
-    new_domain: Optional[str] = None        # dominio di destinazione (multilingual)
+    target_domain: Optional[str] = None   # dominio nuovo di destinazione
+    target_label: Optional[str] = None    # label opzionale del dominio nuovo
     confidence: int
     match_type: str   # exact | slug | gpt | no_match | eliminated | consolidated
     reason: Optional[str] = None
-    language_code: Optional[str] = None     # codice lingua (multilingual)
 
 
 class ExportRequest(BaseModel):
     results: list[MigrationResult]
     old_domain: str
-    new_domain: Optional[str] = None        # usato come fallback per migrazione semplice
 
 
 # ══════════════════════════════════════════════
@@ -44,23 +43,19 @@ class ExportRequest(BaseModel):
 def _parse_screaming_frog_csv(content: bytes, domain: str) -> list[dict]:
     """
     Parsa un CSV Screaming Frog.
-    Filtra righe: Content Type contiene 'text/html' AND Status Code == 200.
+    Filtra: Content Type contiene 'text/html' AND Status Code == 200.
     Ritorna lista di dict con: address (slug), title, h1, inlinks.
     """
     text = content.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
-
     pages = []
     domain_stripped = domain.rstrip("/")
 
     for row in reader:
-        content_type = row.get("Content Type", "")
-        status_code = row.get("Status Code", "")
-
-        if "text/html" not in content_type:
+        if "text/html" not in row.get("Content Type", ""):
             continue
         try:
-            if int(status_code) != 200:
+            if int(row.get("Status Code", 0)) != 200:
                 continue
         except (ValueError, TypeError):
             continue
@@ -69,7 +64,6 @@ def _parse_screaming_frog_csv(content: bytes, domain: str) -> list[dict]:
         if not address:
             continue
 
-        # Normalizza URL — rimuovi dominio, tieni solo slug
         if domain_stripped and address.startswith(domain_stripped):
             slug = address[len(domain_stripped):]
         else:
@@ -102,13 +96,12 @@ def _parse_screaming_frog_csv(content: bytes, domain: str) -> list[dict]:
 # ══════════════════════════════════════════════
 
 def _tokenize_slug(slug: str) -> set[str]:
-    """Split slug su '/', '-', '_', filtra token vuoti."""
     tokens = re.split(r"[/\-_]", slug.lower())
     return {t for t in tokens if len(t) > 1}
 
 
 def _slug_overlap(slug_a: str, slug_b: str) -> float:
-    """Calcola overlap token (Jaccard) tra due slug. Ritorna 0.0–1.0."""
+    """Jaccard overlap tra token di due slug. Ritorna 0.0–1.0."""
     tokens_a = _tokenize_slug(slug_a)
     tokens_b = _tokenize_slug(slug_b)
     if not tokens_a or not tokens_b:
@@ -125,14 +118,30 @@ def _slug_overlap(slug_a: str, slug_b: str) -> float:
 def _strip_lang_prefix(slug: str, prefix: str) -> str:
     """
     Rimuove il prefisso subdirectory lingua dallo slug.
-    es. _strip_lang_prefix('/it/guida-seo', '/it/') → '/guida-seo'
+    _strip_lang_prefix('/it/guida-seo', '/it/') → '/guida-seo'
     """
-    p = "/" + prefix.strip("/")   # normalizza: '/it/' → '/it'
+    p = "/" + prefix.strip("/")
     if slug == p or slug == p + "/":
         return "/"
     if slug.startswith(p + "/"):
-        return slug[len(p):]      # '/it/guida-seo' → '/guida-seo'
+        return slug[len(p):]
     return slug
+
+
+# ══════════════════════════════════════════════
+#  UTILITY — language rule matching
+# ══════════════════════════════════════════════
+
+def _url_matches_rule(url: str, rule: dict) -> bool:
+    """Controlla se un URL corrisponde a una language rule."""
+    pattern = rule.get("pattern", "")
+    if not pattern:
+        return False
+    if rule.get("pattern_type") == "subdirectory":
+        prefix = "/" + pattern.strip("/")
+        return url == prefix or url.startswith(prefix + "/")
+    else:  # domain
+        return pattern in url
 
 
 # ══════════════════════════════════════════════
@@ -145,9 +154,8 @@ async def _gpt_match_batch(
     api_key: str,
 ) -> dict[str, dict]:                # keyed by old page "address"
     """
-    Chiama GPT-4o per matching semantico su match_slug.
-    Batch da 20 pagine. Pre-filtro top 10 candidate per similarità token.
-    Ritorna dict: old_address → {new_url, new_title, confidence, reason}.
+    GPT-4o matching semantico in batch da 20 pagine.
+    Usa match_slug per confronto, restituisce address del sito nuovo.
     """
     client = AsyncOpenAI(api_key=api_key)
     results: dict[str, dict] = {}
@@ -193,14 +201,10 @@ async def _gpt_match_batch(
                         "role": "system",
                         "content": (
                             "Sei un SEO specialist esperto in migrazioni di siti web.\n"
-                            "Ti vengono fornite:\n"
-                            "- Una pagina del sito VECCHIO con Title e H1\n"
-                            "- Una lista di pagine candidate del sito NUOVO con Title e H1\n\n"
-                            "Il tuo compito è identificare quale pagina del sito nuovo è la "
-                            "migliore destinazione per il redirect 301 della pagina vecchia.\n"
-                            "Rispondi SOLO in JSON, senza testo aggiuntivo.\n"
-                            "Se nessuna pagina è semanticamente adeguata, "
-                            "restituisci match_url: null e confidence: 0."
+                            "Identifica la migliore pagina del sito NUOVO come destinazione "
+                            "del redirect 301 per ogni pagina del sito VECCHIO.\n"
+                            "Rispondi SOLO in JSON. Se nessuna pagina è adeguata: "
+                            "match_url: null, confidence: 0."
                         ),
                     },
                     {"role": "user", "content": user_prompt},
@@ -211,23 +215,17 @@ async def _gpt_match_batch(
 
             raw = response.choices[0].message.content or "{}"
             parsed = json.loads(raw)
-
-            if isinstance(parsed, list):
-                gpt_list = parsed
-            else:
-                gpt_list = next((v for v in parsed.values() if isinstance(v, list)), [])
+            gpt_list = parsed if isinstance(parsed, list) else next(
+                (v for v in parsed.values() if isinstance(v, list)), []
+            )
 
             for idx, page in enumerate(batch):
                 empty = {"new_url": None, "new_title": None, "confidence": 0, "reason": None}
-                if idx >= len(gpt_list):
+                if idx >= len(gpt_list) or not isinstance(gpt_list[idx], dict):
                     results[page["address"]] = empty
                     continue
 
                 item = gpt_list[idx]
-                if not isinstance(item, dict):
-                    results[page["address"]] = empty
-                    continue
-
                 match_slug = item.get("match_url")
                 confidence = int(item.get("confidence", 0))
                 reason = item.get("reason")
@@ -235,17 +233,20 @@ async def _gpt_match_batch(
                 if match_slug:
                     candidate_by_slug = {c["match_slug"]: c for c in page.get("_candidates", [])}
                     if match_slug in candidate_by_slug:
-                        matched_new = candidate_by_slug[match_slug]
+                        matched = candidate_by_slug[match_slug]
                         results[page["address"]] = {
-                            "new_url": matched_new["address"],
-                            "new_title": matched_new["title"],
+                            "new_url": matched["address"],
+                            "new_title": matched["title"],
                             "confidence": confidence,
                             "reason": reason,
                         }
                     else:
                         results[page["address"]] = empty
                 else:
-                    results[page["address"]] = {"new_url": None, "new_title": None, "confidence": 0, "reason": reason}
+                    results[page["address"]] = {
+                        "new_url": None, "new_title": None,
+                        "confidence": 0, "reason": reason,
+                    }
 
         except Exception as e:
             for page in batch:
@@ -268,9 +269,9 @@ async def _match_pages(
 ) -> tuple[list[dict], dict]:
     """
     Matching a 3 livelli su match_slug.
-    Ritorna (result_dicts, stats). I result non includono language_code/new_domain.
+    Ritorna (results, stats). Results non includono target_domain/target_label.
     """
-    new_by_match_slug: dict[str, dict] = {p["match_slug"]: p for p in new_pages}
+    new_by_ms: dict[str, dict] = {p["match_slug"]: p for p in new_pages}
     results: list[dict] = []
     to_gpt: list[dict] = []
     stats = {"exact": 0, "slug": 0, "gpt": 0, "no_match": 0}
@@ -279,8 +280,8 @@ async def _match_pages(
         ms = old_page["match_slug"]
 
         # Livello 1 — Match esatto
-        if ms in new_by_match_slug:
-            new_page = new_by_match_slug[ms]
+        if ms in new_by_ms:
+            new_page = new_by_ms[ms]
             results.append({
                 "old_url": old_page["address"],
                 "old_title": old_page["title"],
@@ -305,14 +306,14 @@ async def _match_pages(
                 best_new_page = new_page
 
         if best_overlap >= 0.8 and best_new_page:
-            conf, match_type = 85, "slug"
+            conf = 85
         elif best_overlap >= 0.6 and best_new_page:
-            conf, match_type = 65, "slug"
+            conf = 65
         elif best_overlap >= 0.4 and best_new_page:
-            conf, match_type = 40, "slug"
+            conf = 40
         else:
             best_new_page = None
-            conf, match_type = 0, ""
+            conf = 0
 
         if best_new_page:
             results.append({
@@ -323,7 +324,7 @@ async def _match_pages(
                 "new_url": best_new_page["address"],
                 "new_title": best_new_page["title"],
                 "confidence": conf,
-                "match_type": match_type,
+                "match_type": "slug",
                 "reason": f"Overlap token slug {int(best_overlap*100)}%",
             })
             stats["slug"] += 1
@@ -333,13 +334,11 @@ async def _match_pages(
     # Livello 3 — GPT-4o
     if to_gpt and api_key:
         gpt_results = await _gpt_match_batch(to_gpt, new_pages, api_key)
-
         for old_page in to_gpt:
-            gpt_match = gpt_results.get(old_page["address"], {})
-            new_url = gpt_match.get("new_url")
-            confidence = gpt_match.get("confidence", 0)
-            reason = gpt_match.get("reason")
-
+            gpt = gpt_results.get(old_page["address"], {})
+            new_url = gpt.get("new_url")
+            confidence = gpt.get("confidence", 0)
+            reason = gpt.get("reason")
             if new_url and confidence > 0:
                 results.append({
                     "old_url": old_page["address"],
@@ -347,7 +346,7 @@ async def _match_pages(
                     "old_h1": old_page["h1"],
                     "old_inlinks": old_page["inlinks"],
                     "new_url": new_url,
-                    "new_title": gpt_match.get("new_title"),
+                    "new_title": gpt.get("new_title"),
                     "confidence": confidence,
                     "match_type": "gpt",
                     "reason": reason,
@@ -396,13 +395,15 @@ async def analyze_migration(
 ):
     """
     Analizza CSV Screaming Frog e genera mapping redirect 301.
-    Supporta migrazione semplice (1 dominio) e multilingua (N lingue/domini).
 
     Multipart form-data:
-      config          — JSON string con migration_type, old_domain, new_domain, language_mappings
-      old_csv         — CSV sito vecchio (sempre presente)
-      new_csv_default — CSV sito nuovo (solo migrazione semplice)
-      new_csv_{lang}  — CSV per ogni lingua (migrazione multilingua)
+      config           — JSON: { old_domain, new_domains: [{id, domain, label}], language_rules: [...] }
+      old_csv          — CSV Screaming Frog sito vecchio (1 file con tutti gli URL)
+      new_csv_{id}     — CSV per ogni new_domain (es. new_csv_uuid-1)
+
+    Matching logic:
+      - Se language_rules è vuoto: cerca su tutti i CSV new combinati
+      - Se language_rules configurato: routing per regola, fallback su tutti i CSV
     """
     if not x_openai_key:
         raise HTTPException(status_code=400, detail="API key OpenAI mancante (header X-OpenAI-Key)")
@@ -417,8 +418,11 @@ async def analyze_migration(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Campo 'config' non è JSON valido")
 
-    migration_type = config.get("migration_type", "simple")
     old_domain = config.get("old_domain", "").rstrip("/")
+    new_domains_cfg = config.get("new_domains", [])   # [{id, domain, label}]
+    language_rules = config.get("language_rules", []) # [{pattern, pattern_type, target_domain_id, behavior, ...}]
+
+    # ── Parsing CSV vecchio ──────────────────────────────────────────────────
 
     old_csv_file = form.get("old_csv")
     if not old_csv_file or not hasattr(old_csv_file, "read"):
@@ -433,211 +437,183 @@ async def analyze_migration(
             detail="CSV sito vecchio vuoto o non valido (nessuna pagina HTML 200)",
         )
 
-    # ── Migrazione semplice ───────────────────────────────────────────────────
+    # ── Parsing CSV nuovi (uno per dominio) ─────────────────────────────────
 
-    if migration_type == "simple":
-        new_domain = config.get("new_domain", "").rstrip("/")
-        new_csv_file = form.get("new_csv_default") or form.get("new_csv")
-        if not new_csv_file or not hasattr(new_csv_file, "read"):
-            raise HTTPException(status_code=400, detail="CSV sito nuovo mancante (new_csv_default)")
+    # domain_info_by_id: id → {domain, label}
+    domain_info_by_id: dict[str, dict] = {}
+    # new_pages_by_domain_id: id → lista pagine con match_slug
+    new_pages_by_domain_id: dict[str, list[dict]] = {}
 
-        new_content = await new_csv_file.read()
-        new_pages_raw = _parse_screaming_frog_csv(new_content, new_domain)
-        if not new_pages_raw:
-            raise HTTPException(
-                status_code=400,
-                detail="CSV sito nuovo vuoto o non valido (nessuna pagina HTML 200)",
-            )
+    for nd in new_domains_cfg:
+        domain_id: str = nd.get("id", "")
+        domain_url: str = nd.get("domain", "").rstrip("/")
+        domain_label: str = nd.get("label", "")
+        domain_info_by_id[domain_id] = {"domain": domain_url, "label": domain_label}
 
-        old_pages = [{**p, "match_slug": p["address"]} for p in old_pages_raw]
-        new_pages = [{**p, "match_slug": p["address"]} for p in new_pages_raw]
-
-        match_results, stats = await _match_pages(old_pages, new_pages, x_openai_key)
-
-        for r in match_results:
-            r["language_code"] = None
-            r["new_domain"] = new_domain if r.get("new_url") else None
-
-        matched = stats["exact"] + stats["slug"] + stats["gpt"]
-        return {
-            "total": len(match_results),
-            "matched": matched,
-            "no_match": stats["no_match"],
-            "eliminated": 0,
-            "results": match_results,
-            "stats": {**stats, "eliminated": 0, "consolidated": 0},
-            "by_language": {},
-        }
-
-    # ── Migrazione multilingua ────────────────────────────────────────────────
-
-    language_mappings = config.get("language_mappings", [])
-    main_new_domain = config.get("new_domain", "").rstrip("/")
-
-    # Step 1: Parsa tutti i CSV del sito nuovo (uno per lingua non eliminata)
-    new_pages_by_lang: dict[str, list[dict]] = {}
-    new_domain_by_lang: dict[str, str] = {}
-
-    for lm in language_mappings:
-        lang_code = lm.get("language_code", "")
-        dest_type = lm.get("destination_type", "")
-        dest_value = lm.get("destination_value", "").rstrip("/")
-
-        if dest_type in ("eliminated", "consolidated"):
+        csv_file = form.get(f"new_csv_{domain_id}")
+        if not csv_file or not hasattr(csv_file, "read"):
             continue
 
-        csv_key = f"new_csv_{lang_code}"
-        new_csv_file = form.get(csv_key)
-        if not new_csv_file or not hasattr(new_csv_file, "read"):
-            continue
-
-        domain_for_parsing = dest_value if dest_type == "domain" else main_new_domain
-        content = await new_csv_file.read()
-        raw_pages = _parse_screaming_frog_csv(content, domain_for_parsing)
-
-        # Calcola match_slug: strip prefisso per subdirectory
-        pages = []
-        for p in raw_pages:
-            ms = (
-                _strip_lang_prefix(p["address"], dest_value)
-                if dest_type == "subdirectory" and dest_value
-                else p["address"]
-            )
-            pages.append({**p, "match_slug": ms})
-
-        new_pages_by_lang[lang_code] = pages
-        new_domain_by_lang[lang_code] = dest_value if dest_type == "domain" else main_new_domain
-
-    # Risolvi dominio per lingue consolidate (usa il dominio della lingua target)
-    for lm in language_mappings:
-        if lm.get("destination_type") == "consolidated":
-            lang_code = lm.get("language_code", "")
-            target = lm.get("target_language_code", "")
-            new_domain_by_lang[lang_code] = new_domain_by_lang.get(target, main_new_domain)
-
-    # Step 2: Associa ogni pagina vecchia alla sua lingua
-    # Prima pass: lingue subdirectory (prefix-based), poi domain (catch-all)
-    claimed_addresses: set[str] = set()
-    lang_old_pages_map: dict[str, list[dict]] = {}
-
-    for lm in language_mappings:
-        if lm.get("source_type") != "subdirectory":
-            continue
-        lang_code = lm.get("language_code", "")
-        src_value = lm.get("source_value", "")
-        prefix_clean = "/" + src_value.strip("/")
-
-        pages = []
-        for p in old_pages_raw:
-            addr = p["address"]
-            if addr == prefix_clean or addr.startswith(prefix_clean + "/"):
-                ms = _strip_lang_prefix(addr, src_value)
-                pages.append({**p, "match_slug": ms})
-                claimed_addresses.add(addr)
-        lang_old_pages_map[lang_code] = pages
-
-    for lm in language_mappings:
-        if lm.get("source_type") != "domain":
-            continue
-        lang_code = lm.get("language_code", "")
-        pages = [
-            {**p, "match_slug": p["address"]}
-            for p in old_pages_raw
-            if p["address"] not in claimed_addresses
+        content = await csv_file.read()
+        raw_pages = _parse_screaming_frog_csv(content, domain_url)
+        new_pages_by_domain_id[domain_id] = [
+            {**p, "match_slug": p["address"]} for p in raw_pages
         ]
-        lang_old_pages_map[lang_code] = pages
 
-    # Step 3: Matching per ogni lingua
+    # Mappa inversa address → domain_id (per risolvere target dopo il matching)
+    url_to_domain_id: dict[str, str] = {}
+    for domain_id, pages in new_pages_by_domain_id.items():
+        for p in pages:
+            url_to_domain_id[p["address"]] = domain_id
+
+    # Pool combinato di tutte le pagine nuove (per matching senza regole o fallback)
+    all_new_pages: list[dict] = []
+    for pages in new_pages_by_domain_id.values():
+        all_new_pages.extend(pages)
+
+    if not all_new_pages:
+        raise HTTPException(status_code=400, detail="Nessun CSV sito nuovo valido caricato")
+
+    # ── Helper: annota risultati con target_domain/target_label ─────────────
+
+    def _annotate(r: dict) -> dict:
+        new_url = r.get("new_url")
+        if new_url:
+            did = url_to_domain_id.get(new_url)
+            info = domain_info_by_id.get(did, {}) if did else {}
+            r["target_domain"] = info.get("domain")
+            r["target_label"] = info.get("label")
+        else:
+            r["target_domain"] = None
+            r["target_label"] = None
+        return r
+
+    # ── Matching ─────────────────────────────────────────────────────────────
+
     all_results: list[dict] = []
     all_stats: dict[str, int] = {
         "exact": 0, "slug": 0, "gpt": 0,
         "no_match": 0, "eliminated": 0, "consolidated": 0,
     }
-    by_language: dict[str, dict] = {}
 
-    for lm in language_mappings:
-        lang_code = lm.get("language_code", "")
-        dest_type = lm.get("destination_type", "")
-        target_lang = lm.get("target_language_code", "")
-
-        old_lang_pages = lang_old_pages_map.get(lang_code, [])
-        lang_stat: dict[str, int] = {"total": len(old_lang_pages), "matched": 0, "no_match": 0}
-
-        # Lingua eliminata — nessun redirect
-        if dest_type == "eliminated":
-            for old_page in old_lang_pages:
-                all_results.append({
-                    "old_url": old_page["address"],
-                    "old_title": old_page["title"],
-                    "old_h1": old_page["h1"],
-                    "old_inlinks": old_page["inlinks"],
-                    "new_url": None,
-                    "new_title": None,
-                    "new_domain": None,
-                    "confidence": 0,
-                    "match_type": "eliminated",
-                    "reason": "Lingua eliminata — nessun redirect",
-                    "language_code": lang_code,
-                })
-            all_stats["eliminated"] += len(old_lang_pages)
-            lang_stat["eliminated"] = len(old_lang_pages)
-            by_language[lang_code] = lang_stat
-            continue
-
-        # Lingue con match
-        if dest_type == "consolidated":
-            new_pages = new_pages_by_lang.get(target_lang, [])
-        else:
-            new_pages = new_pages_by_lang.get(lang_code, [])
-
-        dest_new_domain = new_domain_by_lang.get(lang_code, main_new_domain)
-
-        if not new_pages:
-            for old_page in old_lang_pages:
-                all_results.append({
-                    "old_url": old_page["address"],
-                    "old_title": old_page["title"],
-                    "old_h1": old_page["h1"],
-                    "old_inlinks": old_page["inlinks"],
-                    "new_url": None,
-                    "new_title": None,
-                    "new_domain": None,
-                    "confidence": 0,
-                    "match_type": "no_match",
-                    "reason": "Nessun CSV per la lingua di destinazione",
-                    "language_code": lang_code,
-                })
-            all_stats["no_match"] += len(old_lang_pages)
-            lang_stat["no_match"] = len(old_lang_pages)
-            by_language[lang_code] = lang_stat
-            continue
-
-        match_results, lang_stats = await _match_pages(old_lang_pages, new_pages, x_openai_key)
-
-        lang_matched = lang_stats["exact"] + lang_stats["slug"] + lang_stats["gpt"]
-
+    if not language_rules:
+        # Nessuna regola: cerca su tutti i CSV combinati
+        old_pages = [{**p, "match_slug": p["address"]} for p in old_pages_raw]
+        match_results, stats = await _match_pages(old_pages, all_new_pages, x_openai_key)
         for r in match_results:
-            r["language_code"] = lang_code
-            r["new_domain"] = dest_new_domain if r.get("new_url") else None
+            _annotate(r)
+        all_results = match_results
+        for k in ("exact", "slug", "gpt", "no_match"):
+            all_stats[k] += stats.get(k, 0)
 
-            # Lingue consolidate: rinomina match_type nei risultati con match
-            if dest_type == "consolidated" and r["match_type"] not in ("no_match",):
-                r["match_type"] = "consolidated"
+    else:
+        # Routing per regola
+        # Step 1: assegna ogni old page a una regola (prima che matcha vince) o fallback
+        rule_buckets: dict[int, list[dict]] = {}
+        fallback_bucket: list[dict] = []
 
-        all_results.extend(match_results)
+        for p in old_pages_raw:
+            matched_idx = next(
+                (i for i, rule in enumerate(language_rules) if _url_matches_rule(p["address"], rule)),
+                None,
+            )
+            if matched_idx is not None:
+                rule_buckets.setdefault(matched_idx, []).append(p)
+            else:
+                fallback_bucket.append(p)
 
-        # Aggiorna statistiche globali
-        if dest_type == "consolidated":
-            all_stats["consolidated"] += lang_matched
-        else:
-            all_stats["exact"] += lang_stats["exact"]
-            all_stats["slug"] += lang_stats["slug"]
-            all_stats["gpt"] += lang_stats["gpt"]
-        all_stats["no_match"] += lang_stats["no_match"]
+        # Step 2: processa ogni regola
+        for rule_idx, rule in enumerate(language_rules):
+            rule_pages = rule_buckets.get(rule_idx, [])
+            if not rule_pages:
+                continue
 
-        lang_stat["matched"] = lang_matched
-        lang_stat["no_match"] = lang_stats["no_match"]
-        by_language[lang_code] = lang_stat
+            behavior: str = rule.get("behavior", "redirect")
+            pattern: str = rule.get("pattern", "")
+            pattern_type: str = rule.get("pattern_type", "subdirectory")
+            target_domain_id: str = rule.get("target_domain_id", "")
+            consolidated_domain_id: str = rule.get("consolidated_target_domain_id", "")
+
+            # Calcola match_slug: strip prefisso subdirectory per old pages
+            if pattern_type == "subdirectory" and pattern:
+                old_pages_with_ms = [
+                    {**p, "match_slug": _strip_lang_prefix(p["address"], pattern)}
+                    for p in rule_pages
+                ]
+            else:
+                old_pages_with_ms = [{**p, "match_slug": p["address"]} for p in rule_pages]
+
+            # Lingua eliminata
+            if behavior == "eliminated":
+                for op in old_pages_with_ms:
+                    all_results.append({
+                        "old_url": op["address"],
+                        "old_title": op["title"],
+                        "old_h1": op["h1"],
+                        "old_inlinks": op["inlinks"],
+                        "new_url": None,
+                        "new_title": None,
+                        "target_domain": None,
+                        "target_label": None,
+                        "confidence": 0,
+                        "match_type": "eliminated",
+                        "reason": "Lingua eliminata — nessun redirect",
+                    })
+                all_stats["eliminated"] += len(rule_pages)
+                continue
+
+            # Determina quale pool di pagine nuove usare
+            effective_id = consolidated_domain_id if behavior == "consolidated" else target_domain_id
+            target_new_pages = new_pages_by_domain_id.get(effective_id, [])
+            target_info = domain_info_by_id.get(effective_id, {})
+
+            if not target_new_pages:
+                for op in old_pages_with_ms:
+                    all_results.append({
+                        "old_url": op["address"],
+                        "old_title": op["title"],
+                        "old_h1": op["h1"],
+                        "old_inlinks": op["inlinks"],
+                        "new_url": None,
+                        "new_title": None,
+                        "target_domain": None,
+                        "target_label": None,
+                        "confidence": 0,
+                        "match_type": "no_match",
+                        "reason": "Nessun CSV per il dominio di destinazione",
+                    })
+                all_stats["no_match"] += len(rule_pages)
+                continue
+
+            match_results, rule_stats = await _match_pages(
+                old_pages_with_ms, target_new_pages, x_openai_key
+            )
+
+            rule_matched = rule_stats["exact"] + rule_stats["slug"] + rule_stats["gpt"]
+            for r in match_results:
+                r["target_domain"] = target_info.get("domain") if r.get("new_url") else None
+                r["target_label"] = target_info.get("label") if r.get("new_url") else None
+                if behavior == "consolidated" and r["match_type"] not in ("no_match",):
+                    r["match_type"] = "consolidated"
+
+            all_results.extend(match_results)
+
+            if behavior == "consolidated":
+                all_stats["consolidated"] += rule_matched
+            else:
+                for k in ("exact", "slug", "gpt"):
+                    all_stats[k] += rule_stats.get(k, 0)
+            all_stats["no_match"] += rule_stats.get("no_match", 0)
+
+        # Step 3: fallback — pagine senza regola → cerca su tutti i CSV combinati
+        if fallback_bucket:
+            fb_pages = [{**p, "match_slug": p["address"]} for p in fallback_bucket]
+            fb_results, fb_stats = await _match_pages(fb_pages, all_new_pages, x_openai_key)
+            for r in fb_results:
+                _annotate(r)
+            all_results.extend(fb_results)
+            for k in ("exact", "slug", "gpt", "no_match"):
+                all_stats[k] += fb_stats.get(k, 0)
 
     matched = (
         all_stats["exact"]
@@ -653,7 +629,6 @@ async def analyze_migration(
         "eliminated": all_stats["eliminated"],
         "results": all_results,
         "stats": all_stats,
-        "by_language": by_language,
     }
 
 
@@ -668,11 +643,9 @@ def export_csv(
 ):
     """
     Genera CSV con il mapping completo dei redirect.
-    Per migrazione multilingua usa r.new_domain per risultato.
-    Per migrazione semplice usa data.new_domain come fallback.
+    target_domain e target_label sono per-risultato.
     """
     old_domain = data.old_domain.rstrip("/")
-    fallback_new_domain = (data.new_domain or "").rstrip("/")
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -681,7 +654,7 @@ def export_csv(
         "URL vecchio (completo)",
         "URL nuovo (completo)",
         "Dominio nuovo",
-        "Lingua",
+        "Label dominio",
         "Confidenza %",
         "Tipo match",
         "Motivo",
@@ -694,36 +667,38 @@ def export_csv(
 
     for r in data.results:
         old_full = old_domain + r.old_url
-        effective_new_domain = (r.new_domain or fallback_new_domain).rstrip("/")
-        new_full = (effective_new_domain + r.new_url) if r.new_url else ""
+        new_domain_clean = (r.target_domain or "").rstrip("/")
+        new_full = (new_domain_clean + r.new_url) if r.new_url else ""
 
         match_type_label = {
-            "exact":       "Esatto",
-            "slug":        "Slug",
-            "gpt":         "GPT",
-            "no_match":    "Nessuno",
-            "eliminated":  "Eliminata",
+            "exact":        "Esatto",
+            "slug":         "Slug",
+            "gpt":          "GPT",
+            "no_match":     "Nessuno",
+            "eliminated":   "Eliminata",
             "consolidated": "Consolidata",
         }.get(r.match_type, r.match_type)
 
-        lang_label = r.language_code.upper() if r.language_code else ""
+        reason = r.reason or (
+            "Lingua eliminata — pagina rimossa" if r.match_type == "eliminated" else ""
+        )
 
         writer.writerow([
             old_full,
             new_full,
-            effective_new_domain if r.new_url else "",
-            lang_label,
+            r.target_domain or "",
+            r.target_label or "",
             r.confidence,
             match_type_label,
-            r.reason or ("Lingua eliminata — pagina rimossa" if r.match_type == "eliminated" else ""),
+            reason,
             r.old_title,
             r.new_title or "",
             r.old_h1,
-            "",  # H1 nuovo non nel modello
+            "",   # H1 nuovo non nel modello
             r.old_inlinks,
         ])
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM per Excel
+    csv_bytes = output.getvalue().encode("utf-8-sig")
     return StreamingResponse(
         io.BytesIO(csv_bytes),
         media_type="text/csv",
