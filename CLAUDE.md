@@ -94,29 +94,30 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 - Protetto con `Depends(get_current_user)` + header `X-OpenAI-Key`
 - Usa `request: Request` per leggere form fields dinamici
 - Multipart form-data:
-  - `config`: JSON string con `migration_type` ("simple"|"multilingual"), `old_domain`, `new_domain`, `language_mappings`
-  - `old_csv`: CSV sito vecchio (sempre presente)
-  - `new_csv_default`: CSV sito nuovo (migrazione semplice)
-  - `new_csv_{lang_code}`: CSV per ogni lingua non eliminata (migrazione multilingua)
+  - `config`: JSON string con `old_domain`, `new_domains: [{id, domain, label}]`, `language_rules: [{pattern, pattern_type, target_domain_id, behavior, consolidated_target_domain_id?}]`
+  - `old_csv`: CSV sito vecchio (unico, sempre presente)
+  - `new_csv_{domain_id}`: CSV per ogni new domain (field name usa l'id UUID del dominio)
 - Filtra righe `Content Type` contiene `text/html` AND `Status Code == 200`
 - Core matching (`_match_pages`): 3 livelli su `match_slug` — esatto (100%), overlap token (≥80%→85%, ≥60%→65%, ≥40%→40%), GPT-4o batch
-- `match_slug` = slug senza prefisso lingua (es. `/it/guida-seo` → `/guida-seo`)
-- Logica multilingua per ogni `language_mapping`:
-  - `source_type=subdirectory`: filtra old pages per prefisso (es. `/it/`), strip per match_slug
-  - `source_type=domain`: catch-all (pagine non claimedda altre lingue)
-  - `destination_type=eliminated`: match_type="eliminated", no redirect
-  - `destination_type=consolidated`: matching contro new pages della lingua target, match_type="consolidated"
-  - `destination_type=subdirectory|domain`: matching standard contro new_csv della lingua
-- Risposta: `{ total, matched, no_match, eliminated, results: [...], stats: {...}, by_language: {...} }`
-- `MigrationResult` ha campi aggiuntivi: `new_domain` (per multilingual), `language_code`, match_type include "eliminated"|"consolidated"
+- `match_slug` = slug normalizzato senza prefisso lingua (es. `/it/guida-seo` → `/guida-seo`)
+- Logica instradamento:
+  - Se nessuna `language_rule`: tutte le old pages matchate contro pool combinato di tutti i new CSV
+  - Se regole presenti: ogni old page assegnata alla prima regola corrispondente (`_url_matches_rule`):
+    - `behavior=redirect`: matching standard contro new_csv del dominio target
+    - `behavior=eliminated`: match_type="eliminated", no redirect
+    - `behavior=consolidated`: matching contro new_csv del dominio di consolidamento, match_type="consolidated"
+  - Old pages senza regola corrispondente: fallback su pool combinato di tutti i new CSV
+- `url_to_domain_id` dict inverso: `{new_url → domain_id}` per annotare `target_domain`/`target_label` post-match
+- Risposta: `{ total, matched, no_match, eliminated, results: [...], stats: { exact, slug, gpt, no_match, eliminated, consolidated } }`
+- `MigrationResult` fields: `target_domain` (URL del dominio dest), `target_label` (label opzionale); match_type include "eliminated"|"consolidated"
 
 ### POST `/api/migration/export-csv`
 - Protetto con `Depends(get_current_user)`
-- Body JSON: `{ results: [...], old_domain: "...", new_domain: "..." }` — `new_domain` opzionale (fallback per semplice)
-- Per multilingual: usa `r.new_domain` per-risultato; per semplice: usa `data.new_domain` come fallback
+- Body JSON: `{ results: [...], old_domain: "..." }`
+- Usa `r.target_domain` per-risultato per la colonna "Dominio nuovo"
 - Ritorna file CSV (StreamingResponse) con BOM UTF-8 per compatibilità Excel
 - Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
-- Colonne: URL vecchio, URL nuovo, Dominio nuovo, Lingua, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, H1 nuovo, Inlinks
+- Colonne: URL vecchio, URL nuovo, Dominio nuovo, Label dominio, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, Inlinks
 
 ## Come aggiungere un endpoint
 
