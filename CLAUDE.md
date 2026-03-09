@@ -28,6 +28,8 @@ services/         → business logic pura (no FastAPI, no Supabase — testabili
   serp.py            → query SerpAPI
   gsc.py             → fetch Google Search Console ultimi 28 giorni
   dataforseo.py      → get_search_volume() — volume mensile da DataForSEO Google Ads API
+cron/             → script standalone per Render Cron Job (nessun import FastAPI)
+  gsc_sync_all.py → sync GSC settimanale per tutti i clienti con gsc_property configurata
 migrations/       → SQL da applicare manualmente in Supabase Dashboard → SQL Editor
   001_keyword_status.sql
   002_gsc_integration.sql
@@ -36,6 +38,7 @@ migrations/       → SQL da applicare manualmente in Supabase Dashboard → SQL
   005_dataforseo.sql
   006_position_history.sql
 docs/adr/         → Architecture Decision Records
+docs/cron-setup.md → istruzioni configurazione Render Cron Job per GSC sync settimanale
 tests/            → test automatici (pytest)
 ```
 
@@ -108,6 +111,17 @@ DATAFORSEO_PASSWORD       → password account DataForSEO (credenziale server, n
 - Sezioni logiche nei router delimitate con `# ══════════════`
 - Migrazioni numerate `NNN_descrizione.sql`
 - Response bodies: dict Python (FastAPI li serializza automaticamente)
+
+## Cron Jobs
+
+| Script | Schedule | Comando Render | Descrizione |
+|--------|----------|----------------|-------------|
+| `cron/gsc_sync_all.py` | `0 6 * * 1` (lun 06:00 UTC) | `python cron/gsc_sync_all.py` | Sync GSC per tutti i clienti con `gsc_property` configurata |
+
+- Usa `SUPABASE_SERVICE_ROLE_KEY` (service role, accesso diretto senza JWT)
+- Riusa `services/gsc.py` — nessuna duplicazione della logica fetch GSC
+- Se un cliente fallisce, il sync continua per gli altri (errori loggati, no exit)
+- Istruzioni configurazione Render: `docs/cron-setup.md`
 
 ## Workflow "prompt-safe"
 
