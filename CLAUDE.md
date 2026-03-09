@@ -92,18 +92,31 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 
 ### POST `/api/migration/analyze`
 - Protetto con `Depends(get_current_user)` + header `X-OpenAI-Key`
-- Multipart form-data: `old_csv`, `new_csv` (file CSV Screaming Frog), `old_domain`, `new_domain`
+- Usa `request: Request` per leggere form fields dinamici
+- Multipart form-data:
+  - `config`: JSON string con `migration_type` ("simple"|"multilingual"), `old_domain`, `new_domain`, `language_mappings`
+  - `old_csv`: CSV sito vecchio (sempre presente)
+  - `new_csv_default`: CSV sito nuovo (migrazione semplice)
+  - `new_csv_{lang_code}`: CSV per ogni lingua non eliminata (migrazione multilingua)
 - Filtra righe `Content Type` contiene `text/html` AND `Status Code == 200`
-- Matching a 3 livelli: (1) slug esatto → 100%, (2) overlap token slug (≥80%→85%, ≥60%→65%, ≥40%→40%), (3) GPT-4o semantico per il resto
-- GPT-4o chiama in batch da 20 pagine, con pre-filtro top 10 candidate per similarità token
-- Risposta: `{ total, matched, no_match, results: [...], stats: { exact, slug, gpt, no_match } }`
+- Core matching (`_match_pages`): 3 livelli su `match_slug` — esatto (100%), overlap token (≥80%→85%, ≥60%→65%, ≥40%→40%), GPT-4o batch
+- `match_slug` = slug senza prefisso lingua (es. `/it/guida-seo` → `/guida-seo`)
+- Logica multilingua per ogni `language_mapping`:
+  - `source_type=subdirectory`: filtra old pages per prefisso (es. `/it/`), strip per match_slug
+  - `source_type=domain`: catch-all (pagine non claimedda altre lingue)
+  - `destination_type=eliminated`: match_type="eliminated", no redirect
+  - `destination_type=consolidated`: matching contro new pages della lingua target, match_type="consolidated"
+  - `destination_type=subdirectory|domain`: matching standard contro new_csv della lingua
+- Risposta: `{ total, matched, no_match, eliminated, results: [...], stats: {...}, by_language: {...} }`
+- `MigrationResult` ha campi aggiuntivi: `new_domain` (per multilingual), `language_code`, match_type include "eliminated"|"consolidated"
 
 ### POST `/api/migration/export-csv`
 - Protetto con `Depends(get_current_user)`
-- Body JSON: `{ results: [...], old_domain: "...", new_domain: "..." }`
+- Body JSON: `{ results: [...], old_domain: "...", new_domain: "..." }` — `new_domain` opzionale (fallback per semplice)
+- Per multilingual: usa `r.new_domain` per-risultato; per semplice: usa `data.new_domain` come fallback
 - Ritorna file CSV (StreamingResponse) con BOM UTF-8 per compatibilità Excel
 - Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
-- Colonne: URL vecchio, URL nuovo, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, H1 nuovo, Inlinks
+- Colonne: URL vecchio, URL nuovo, Dominio nuovo, Lingua, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, H1 nuovo, Inlinks
 
 ## Come aggiungere un endpoint
 
