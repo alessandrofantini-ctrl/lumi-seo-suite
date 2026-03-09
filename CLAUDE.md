@@ -22,6 +22,7 @@ routers/          → HTTP endpoints organizzati per dominio
   clients.py      → clienti, keyword_history, GSC sync, DataForSEO volume enrichment
   seo.py          → analisi SERP + brief generation
   writer.py       → generazione articoli da brief
+  migration.py    → mapping redirect 301: analisi CSV Screaming Frog + GPT-4o + export CSV
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
@@ -86,6 +87,23 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 4 | CORS `allow_origins=["*"]` — da restringere all'URL Vercel in produzione | `main.py:14` |
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 | 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
+
+## Endpoint migrazione (routers/migration.py)
+
+### POST `/api/migration/analyze`
+- Protetto con `Depends(get_current_user)` + header `X-OpenAI-Key`
+- Multipart form-data: `old_csv`, `new_csv` (file CSV Screaming Frog), `old_domain`, `new_domain`
+- Filtra righe `Content Type` contiene `text/html` AND `Status Code == 200`
+- Matching a 3 livelli: (1) slug esatto → 100%, (2) overlap token slug (≥80%→85%, ≥60%→65%, ≥40%→40%), (3) GPT-4o semantico per il resto
+- GPT-4o chiama in batch da 20 pagine, con pre-filtro top 10 candidate per similarità token
+- Risposta: `{ total, matched, no_match, results: [...], stats: { exact, slug, gpt, no_match } }`
+
+### POST `/api/migration/export-csv`
+- Protetto con `Depends(get_current_user)`
+- Body JSON: `{ results: [...], old_domain: "...", new_domain: "..." }`
+- Ritorna file CSV (StreamingResponse) con BOM UTF-8 per compatibilità Excel
+- Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
+- Colonne: URL vecchio, URL nuovo, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, H1 nuovo, Inlinks
 
 ## Come aggiungere un endpoint
 
