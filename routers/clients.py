@@ -66,10 +66,11 @@ class KeywordBulkRequest(BaseModel):
     keywords: list[KeywordItem]
 
 class KeywordUpdate(BaseModel):
-    status:   Optional[str] = None  # backlog | planned | brief_done | written | published
-    cluster:  Optional[str] = None
-    intent:   Optional[str] = None  # informativo | commerciale | navigazionale | transazionale
-    priority: Optional[str] = None  # alta | media | bassa
+    status:        Optional[str] = None  # backlog | planned | brief_done | written | published
+    cluster:       Optional[str] = None
+    intent:        Optional[str] = None  # informativo | commerciale | navigazionale | transazionale
+    priority:      Optional[str] = None  # alta | media | bassa
+    search_volume: Optional[int] = None
 
 # ══════════════════════════════════════════════
 #  ROUTE CLIENTI
