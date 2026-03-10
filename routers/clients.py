@@ -72,6 +72,7 @@ class KeywordUpdate(BaseModel):
     priority:      Optional[str] = None  # alta | media | bassa
     search_volume: Optional[int] = None
     published_url: Optional[str] = None
+    planned_month: Optional[str] = None  # formato "YYYY-MM"
 
 # ══════════════════════════════════════════════
 #  ROUTE CLIENTI
@@ -81,6 +82,19 @@ class KeywordUpdate(BaseModel):
 def get_all_clients(_user=Depends(get_current_user)):
     """Restituisce tutti i clienti."""
     res = supabase.table("clients").select("*").order("name").execute()
+    return res.data
+
+
+@router.get("/calendar")
+def get_calendar_keywords(_user=Depends(get_current_user)):
+    """Restituisce tutte le keyword con planned_month configurato, con il nome del cliente."""
+    res = (
+        supabase.table("keyword_history")
+        .select("id, keyword, status, planned_month, client_id, cluster, intent, priority, clients(id, name)")
+        .not_.is_("planned_month", "null")
+        .neq("planned_month", "")
+        .execute()
+    )
     return res.data
 
 
