@@ -178,33 +178,6 @@ async def add_keyword(client_id: str, data: KeywordRequest, _user=Depends(get_cu
     }).execute()
     record = res.data[0]
 
-    # DataForSEO — arricchimento volume di ricerca (silenzioso se credenziali assenti)
-    dfs_login    = os.getenv("DATAFORSEO_LOGIN", "")
-    dfs_password = os.getenv("DATAFORSEO_PASSWORD", "")
-    if dfs_login and dfs_password:
-        try:
-            client_row = (
-                supabase.table("clients")
-                .select("language_code, location_code")
-                .eq("id", client_id)
-                .single()
-                .execute()
-            )
-            lang = (client_row.data or {}).get("language_code") or "it"
-            loc  = (client_row.data or {}).get("location_code") or 2380
-            volumes = await get_search_volume([data.keyword], lang, loc, dfs_login, dfs_password)
-            vol = volumes.get(data.keyword)
-            if vol is not None:
-                now = datetime.now().isoformat()
-                supabase.table("keyword_history").update({
-                    "search_volume": vol,
-                    "volume_updated_at": now,
-                }).eq("id", record["id"]).execute()
-                record["search_volume"] = vol
-                record["volume_updated_at"] = now
-        except Exception as exc:
-            logger.warning("DataForSEO skip (singola): %s", exc)
-
     return record
 
 
@@ -259,6 +232,78 @@ async def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depe
             logger.warning("DataForSEO skip (bulk): %s", exc)
 
     return {"added": len(inserted), "skipped": len(data.keywords) - len(to_insert)}
+
+
+@router.post("/{client_id}/keywords/refresh-volumes")
+async def refresh_volumes(client_id: str, _user=Depends(get_current_user)):
+    """
+    Aggiorna i volumi DataForSEO per tutte le keyword del cliente.
+    Throttle: max 1 aggiornamento ogni 30 giorni (controllato su clients.volume_refreshed_at).
+    """
+    client_row = (
+        supabase.table("clients")
+        .select("language_code, location_code, volume_refreshed_at")
+        .eq("id", client_id)
+        .single()
+        .execute()
+    )
+    if not client_row.data:
+        raise HTTPException(status_code=404, detail="Cliente non trovato")
+
+    client_data = client_row.data
+    volume_refreshed_at = client_data.get("volume_refreshed_at")
+
+    if volume_refreshed_at:
+        refreshed_dt = datetime.fromisoformat(volume_refreshed_at.replace("Z", "+00:00"))
+        next_refresh = refreshed_dt + timedelta(days=30)
+        if datetime.now(refreshed_dt.tzinfo) < next_refresh:
+            return {
+                "skipped": True,
+                "reason": "Volumi aggiornati di recente",
+                "next_refresh": next_refresh.isoformat(),
+            }
+
+    kw_res = (
+        supabase.table("keyword_history")
+        .select("id, keyword")
+        .eq("client_id", client_id)
+        .execute()
+    )
+    keywords = kw_res.data or []
+    if not keywords:
+        return {"skipped": False, "updated": 0, "cost_estimate": "~$0.0000"}
+
+    dfs_login    = os.getenv("DATAFORSEO_LOGIN", "")
+    dfs_password = os.getenv("DATAFORSEO_PASSWORD", "")
+    if not dfs_login or not dfs_password:
+        raise HTTPException(status_code=503, detail="DataForSEO non configurato")
+
+    lang = client_data.get("language_code") or "it"
+    loc  = client_data.get("location_code") or 2380
+    kw_list = [r["keyword"] for r in keywords]
+
+    volumes = await get_search_volume(kw_list, lang, loc, dfs_login, dfs_password)
+    now = datetime.now().isoformat()
+    updated = 0
+    for record in keywords:
+        vol = volumes.get(record["keyword"])
+        if vol is not None:
+            supabase.table("keyword_history").update({
+                "search_volume": vol,
+                "volume_updated_at": now,
+            }).eq("id", record["id"]).execute()
+            updated += 1
+
+    supabase.table("clients").update({
+        "volume_refreshed_at": now,
+    }).eq("id", client_id).execute()
+
+    n = len(kw_list)
+    return {
+        "skipped": False,
+        "updated": updated,
+        "cost_estimate": f"~${n * 0.075 / 1000:.4f}",
+    }
 
 
 @router.patch("/{client_id}/keywords/{keyword_id}")
