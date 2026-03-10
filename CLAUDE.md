@@ -89,6 +89,18 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 | 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
 
+## Endpoint volume refresh (routers/clients.py)
+
+### POST `/{client_id}/keywords/refresh-volumes`
+- Protetto con `Depends(get_current_user)`
+- Nessun body
+- Throttle 30 giorni: controlla `clients.volume_refreshed_at`; se < 30gg fa → risponde `{ skipped: true, reason, next_refresh }`
+- Altrimenti: carica tutte le keyword del cliente, chiama `get_search_volume` in batch, aggiorna `search_volume` + `volume_updated_at` per ogni keyword, aggiorna `clients.volume_refreshed_at = now()`
+- Response: `{ skipped: false, updated: N, cost_estimate: "~$X.XXXX" }`
+- Richiede `DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD` env vars (503 se assenti)
+- Nota: POST `/{client_id}/keywords` (singola) NON chiama più DataForSEO — solo bulk e refresh manuale
+- Migration: `migrations/007_volume_refresh.sql` — aggiunge `volume_refreshed_at TIMESTAMPTZ` a `clients`
+
 ## Endpoint dashboard (routers/dashboard.py)
 
 ### GET `/api/dashboard`
