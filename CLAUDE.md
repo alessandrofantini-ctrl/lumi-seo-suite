@@ -72,6 +72,7 @@ search_volume, volume_updated_at     ← aggiunto in migration 005 (DataForSEO)
 published_url                        ← aggiunto in migration 008 (URL pagina pubblicata)
 page_position, page_clicks, page_impressions, page_ctr, page_updated_at
                                      ← aggiunto in migration 008 (rendimento GSC della pagina)
+planned_month                        ← aggiunto in migration 009 (TEXT, formato "YYYY-MM")
 ```
 Nota: `impressions/clicks/position/ctr` = rendimento della keyword come query di ricerca.
 `page_*` = rendimento della pagina pubblicata come URL (aggregate su tutte le query che portano a quell'URL).
@@ -118,6 +119,15 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 - Richiede `DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD` env vars (503 se assenti)
 - Nota: POST `/{client_id}/keywords` (singola) NON chiama più DataForSEO — solo bulk e refresh manuale
 - Migration: `migrations/007_volume_refresh.sql` — aggiunge `volume_refreshed_at TIMESTAMPTZ` a `clients`
+
+## Endpoint calendario (routers/clients.py)
+
+### GET `/calendar`
+- Protetto con `Depends(get_current_user)`
+- Nessun body
+- Restituisce tutte le keyword con `planned_month` non null/vuoto, con join `clients(id, name)`
+- Select: `id, keyword, status, planned_month, client_id, cluster, intent, priority, clients(id, name)`
+- IMPORTANTE: questa route è definita PRIMA di `/{client_id}` per evitare conflitti FastAPI
 
 ## Endpoint dashboard (routers/dashboard.py)
 
