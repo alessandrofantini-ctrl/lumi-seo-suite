@@ -23,6 +23,7 @@ routers/          → HTTP endpoints organizzati per dominio
   seo.py          → analisi SERP + brief generation
   writer.py       → generazione articoli da brief
   migration.py    → mapping redirect 301: analisi CSV Screaming Frog + GPT-4o + export CSV
+  dashboard.py    → vista cross-cliente: metriche keyword trend per tutti i clienti
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
@@ -88,7 +89,7 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 | 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
 
-## Endpoint dashboard (routers/clients.py)
+## Endpoint dashboard (routers/dashboard.py)
 
 ### GET `/api/dashboard`
 - Protetto con `Depends(get_current_user)`
