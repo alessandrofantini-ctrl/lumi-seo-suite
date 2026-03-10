@@ -49,3 +49,42 @@ def fetch_gsc_queries(site_url: str, days: int = 28) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def fetch_gsc_page_metrics(property_url: str, page_url: str) -> dict | None:
+    """
+    Recupera metriche GSC aggregate per un URL specifico
+    (ultimi 28 giorni, tutte le query che portano a quella pagina).
+    Ritorna { position, clicks, impressions, ctr } o None se la pagina
+    non appare in GSC.
+    """
+    # GSC ha un ritardo di ~3 giorni
+    end = date.today() - timedelta(days=3)
+    start = end - timedelta(days=28)
+
+    service = _get_service()
+    body = {
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "dimensions": ["page"],
+        "dimensionFilterGroups": [{
+            "filters": [{
+                "dimension": "page",
+                "operator": "equals",
+                "expression": page_url,
+            }]
+        }],
+    }
+    resp = service.searchanalytics().query(siteUrl=property_url, body=body).execute()
+    rows = resp.get("rows", [])
+
+    if not rows:
+        return None
+
+    r = rows[0]
+    return {
+        "clicks":      int(r.get("clicks", 0)),
+        "impressions": int(r.get("impressions", 0)),
+        "ctr":         round(r.get("ctr", 0.0), 4),
+        "position":    round(r.get("position", 0.0), 1),
+    }
