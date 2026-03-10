@@ -71,6 +71,7 @@ class KeywordUpdate(BaseModel):
     intent:        Optional[str] = None  # informativo | commerciale | navigazionale | transazionale
     priority:      Optional[str] = None  # alta | media | bassa
     search_volume: Optional[int] = None
+    published_url: Optional[str] = None
 
 # ══════════════════════════════════════════════
 #  ROUTE CLIENTI
@@ -451,6 +452,36 @@ def gsc_sync(client_id: str, _user=Depends(get_current_user)):
         }).execute()
 
         updated += 1
+
+    # ── Sync dati pagina pubblicata ──────────────────
+    # Carica keyword con published_url configurato
+    pages = (
+        supabase.table("keyword_history")
+        .select("id, published_url")
+        .eq("client_id", client_id)
+        .not_.is_("published_url", "null")
+        .neq("published_url", "")
+        .execute()
+    )
+    if pages.data:
+        from services.gsc import fetch_gsc_page_metrics
+        for kw in pages.data:
+            try:
+                metrics = fetch_gsc_page_metrics(
+                    client.data["gsc_property"],
+                    kw["published_url"]
+                )
+                if metrics:
+                    supabase.table("keyword_history").update({
+                        "page_position":    metrics["position"],
+                        "page_clicks":      metrics["clicks"],
+                        "page_impressions": metrics["impressions"],
+                        "page_ctr":         metrics["ctr"],
+                        "page_updated_at":  now,
+                    }).eq("id", kw["id"]).execute()
+            except Exception as exc:
+                logger.warning("GSC page sync skip (%s): %s",
+                               kw["published_url"], exc)
 
     return {"synced": updated, "total": len(existing_map)}
 

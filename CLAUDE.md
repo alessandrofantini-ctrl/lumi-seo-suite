@@ -29,6 +29,8 @@ services/         → business logic pura (no FastAPI, no Supabase — testabili
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
   serp.py            → query SerpAPI
   gsc.py             → fetch Google Search Console ultimi 28 giorni
+                        fetch_gsc_queries(site_url, days) → metriche per keyword (query)
+                        fetch_gsc_page_metrics(property_url, page_url) → metriche per URL pagina
   dataforseo.py      → get_search_volume() — volume mensile da DataForSEO Google Ads API
 cron/             → script standalone per Render Cron Job (nessun import FastAPI)
   gsc_sync_all.py → sync GSC settimanale per tutti i clienti con gsc_property configurata
@@ -67,7 +69,12 @@ keyword, status, cluster, intent, priority
 impressions, clicks, position, ctr, gsc_updated_at
 position_prev, position_updated_at   ← aggiunto in migration 004
 search_volume, volume_updated_at     ← aggiunto in migration 005 (DataForSEO)
+published_url                        ← aggiunto in migration 008 (URL pagina pubblicata)
+page_position, page_clicks, page_impressions, page_ctr, page_updated_at
+                                     ← aggiunto in migration 008 (rendimento GSC della pagina)
 ```
+Nota: `impressions/clicks/position/ctr` = rendimento della keyword come query di ricerca.
+`page_*` = rendimento della pagina pubblicata come URL (aggregate su tutte le query che portano a quell'URL).
 
 ### Valori intent validi
 `informativo | commerciale | navigazionale | transazionale`
