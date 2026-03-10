@@ -88,6 +88,20 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 | 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
 
+## Endpoint dashboard (routers/clients.py)
+
+### GET `/api/dashboard`
+- Protetto con `Depends(get_current_user)`
+- Nessun body — risponde con array JSON
+- Legge tutti i clienti (`clients`) e tutte le keyword (`keyword_history.client_id, position, position_prev, gsc_updated_at`)
+- Per ogni cliente calcola:
+  - `total_keywords`: conteggio righe keyword_history
+  - `keywords_crescita`: righe con `position != null AND position_prev != null AND position < position_prev`
+  - `keywords_calo`: righe con `position != null AND position_prev != null AND position > position_prev`
+  - `last_sync`: valore massimo di `gsc_updated_at` tra le keyword del cliente
+- Ordine risposta: `keywords_calo` desc (clienti più critici prima)
+- Response: `[{ id, name, sector, total_keywords, keywords_crescita, keywords_calo, last_sync }]`
+
 ## Endpoint migrazione (routers/migration.py)
 
 ### POST `/api/migration/analyze`
