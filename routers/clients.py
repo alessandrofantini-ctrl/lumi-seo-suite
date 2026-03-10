@@ -60,6 +60,7 @@ class KeywordItem(BaseModel):
     cluster:  Optional[str] = ""
     intent:   Optional[str] = ""
     priority: Optional[str] = ""
+    volume:   Optional[int] = None
 
 class KeywordBulkRequest(BaseModel):
     keywords: list[KeywordItem]
@@ -213,6 +214,9 @@ async def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depe
             row["intent"] = item.intent.lower()
         if item.priority and item.priority.lower() in VALID_PRIORITY:
             row["priority"] = item.priority.lower()
+        if item.volume is not None and item.volume > 0:
+            row["search_volume"] = item.volume
+            row["volume_updated_at"] = datetime.now().isoformat()
         to_insert.append(row)
 
     if not to_insert:
