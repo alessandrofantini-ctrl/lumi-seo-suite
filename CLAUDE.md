@@ -89,6 +89,17 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 | 5 | GSC sync salva `position_prev` prima di sovrascrivere `position` | `routers/clients.py` — gsc_sync |
 | 6 | GSC sync inserisce snapshot in `keyword_position_history` (trend storico) | `routers/clients.py` — gsc_sync |
 
+## Endpoint bulk keyword (routers/clients.py)
+
+### POST `/{client_id}/keywords/bulk`
+- Body: `{ keywords: KeywordItem[] }` dove `KeywordItem = { keyword, cluster?, intent?, priority? }`
+- Salta duplicati (case-insensitive su `existing_set`)
+- Valida `intent` contro `VALID_INTENT = {informativo, commerciale, navigazionale, transazionale}`
+- Valida `priority` contro `VALID_PRIORITY = {alta, media, bassa}` — valori non validi ignorati
+- Salva `cluster`, `intent`, `priority` se presenti nella riga CSV
+- Dopo insert: chiama DataForSEO in batch per arricchire `search_volume`
+- Response: `{ added: N, skipped: M }`
+
 ## Endpoint volume refresh (routers/clients.py)
 
 ### POST `/{client_id}/keywords/refresh-volumes`

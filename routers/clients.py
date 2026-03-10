@@ -55,8 +55,14 @@ class AutoGenerateRequest(BaseModel):
 class KeywordRequest(BaseModel):
     keyword: str
 
+class KeywordItem(BaseModel):
+    keyword:  str
+    cluster:  Optional[str] = ""
+    intent:   Optional[str] = ""
+    priority: Optional[str] = ""
+
 class KeywordBulkRequest(BaseModel):
-    keywords: list[str]
+    keywords: list[KeywordItem]
 
 class KeywordUpdate(BaseModel):
     status:   Optional[str] = None  # backlog | planned | brief_done | written | published
@@ -192,11 +198,22 @@ async def bulk_add_keywords(client_id: str, data: KeywordBulkRequest, _user=Depe
     )
     existing_set = {r["keyword"].lower() for r in existing.data}
 
-    to_insert = [
-        {"client_id": client_id, "keyword": kw.strip(), "status": "backlog"}
-        for kw in data.keywords
-        if kw.strip() and kw.strip().lower() not in existing_set
-    ]
+    VALID_INTENT   = {"informativo", "commerciale", "navigazionale", "transazionale"}
+    VALID_PRIORITY = {"alta", "media", "bassa"}
+
+    to_insert = []
+    for item in data.keywords:
+        kw = item.keyword.strip()
+        if not kw or kw.lower() in existing_set:
+            continue
+        row: dict = {"client_id": client_id, "keyword": kw, "status": "backlog"}
+        if item.cluster:
+            row["cluster"] = item.cluster
+        if item.intent and item.intent.lower() in VALID_INTENT:
+            row["intent"] = item.intent.lower()
+        if item.priority and item.priority.lower() in VALID_PRIORITY:
+            row["priority"] = item.priority.lower()
+        to_insert.append(row)
 
     if not to_insert:
         return {"added": 0, "skipped": len(data.keywords)}
