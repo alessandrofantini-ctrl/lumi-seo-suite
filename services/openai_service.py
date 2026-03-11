@@ -261,11 +261,29 @@ async def generate_article(
     target_page_url: str,
     length: str,
     creativity: float,
+    tone_of_voice: str = "",
+    products_services: str = "",
     api_key: str | None = None,
 ) -> str:
     client = _openai_client(api_key)
     word_target = get_word_target(length)
 
+    tone_instruction = f"\n- Tono di voce: {tone_of_voice}." if tone_of_voice else ""
+    products_block = f"\n\nProdotti/servizi del cliente (priorità massima — menziona solo ciò che il cliente offre realmente):\n{products_services}" if products_services else ""
+
+    system_prompt = f"""Sei un senior SEO copywriter.
+Scrivi contenuti autorevoli ma concreti, senza frasi generiche.
+Stile: chiaro, operativo, orientato a decisioni e casi reali.
+
+Regole:
+- Scrivi in italiano.
+- Maiuscole: sentence case per H1/H2/H3.
+- Evita claim numerici non supportati.
+- Niente "come vedremo", "nel mondo di oggi", "rivoluzionare".{tone_instruction}"""
+
+    user_prompt = f"""
+Brief SEO:
+{brief_text}{products_block}
     # Estrai tone of voice e prodotti dal brief se presenti
     tone_hint = ""
     products_hint = ""
