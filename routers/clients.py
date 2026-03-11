@@ -80,9 +80,92 @@ class KeywordUpdate(BaseModel):
 
 @router.get("/")
 def get_all_clients(_user=Depends(get_current_user)):
-    """Restituisce tutti i clienti."""
-    res = supabase.table("clients").select("*").order("name").execute()
-    return res.data
+    """Restituisce tutti i clienti con metriche GSC aggregate e trend mensile."""
+    clients_res = supabase.table("clients").select("*").order("name").execute()
+    if not clients_res.data:
+        return []
+
+    now        = datetime.utcnow()
+    start_curr = (now - timedelta(days=28)).isoformat()
+    start_prev = (now - timedelta(days=56)).isoformat()
+    end_prev   = (now - timedelta(days=28)).isoformat()
+
+    hist_curr = supabase.table("keyword_position_history") \
+        .select("client_id, clicks, impressions, position") \
+        .gte("recorded_at", start_curr) \
+        .execute()
+
+    hist_prev = supabase.table("keyword_position_history") \
+        .select("client_id, clicks, impressions") \
+        .gte("recorded_at", start_prev) \
+        .lt("recorded_at", end_prev) \
+        .execute()
+
+    kw_res = supabase.table("keyword_history") \
+        .select("client_id, position, position_prev, gsc_updated_at") \
+        .execute()
+
+    curr: dict = defaultdict(lambda: {
+        "clicks": 0, "impressions": 0, "positions": [], "last_sync": None
+    })
+    for row in (hist_curr.data or []):
+        cid = row["client_id"]
+        curr[cid]["clicks"]      += row.get("clicks") or 0
+        curr[cid]["impressions"] += row.get("impressions") or 0
+        if row.get("position"):
+            curr[cid]["positions"].append(row["position"])
+
+    prev: dict = defaultdict(lambda: {"clicks": 0, "impressions": 0})
+    for row in (hist_prev.data or []):
+        cid = row["client_id"]
+        prev[cid]["clicks"]      += row.get("clicks") or 0
+        prev[cid]["impressions"] += row.get("impressions") or 0
+
+    kw_stats: dict = defaultdict(lambda: {
+        "total": 0, "crescita": 0, "calo": 0, "last_sync": None
+    })
+    for row in (kw_res.data or []):
+        cid = row["client_id"]
+        kw_stats[cid]["total"] += 1
+        pos      = row.get("position")
+        pos_prev = row.get("position_prev")
+        if pos is not None and pos_prev is not None:
+            if pos < pos_prev:
+                kw_stats[cid]["crescita"] += 1
+            elif pos > pos_prev:
+                kw_stats[cid]["calo"] += 1
+        gsc_date = row.get("gsc_updated_at")
+        if gsc_date:
+            current = kw_stats[cid]["last_sync"]
+            if current is None or gsc_date > current:
+                kw_stats[cid]["last_sync"] = gsc_date
+
+    def pct_change(curr_val: int, prev_val: int) -> float | None:
+        if prev_val == 0:
+            return None
+        return round(((curr_val - prev_val) / prev_val) * 100, 1)
+
+    result = []
+    for client in clients_res.data:
+        cid = client["id"]
+        c   = curr.get(cid, {"clicks": 0, "impressions": 0, "positions": []})
+        p   = prev.get(cid, {"clicks": 0, "impressions": 0})
+        s   = kw_stats.get(cid, {"total": 0, "crescita": 0, "calo": 0, "last_sync": None})
+        positions = c.get("positions") or []
+        avg_pos   = round(sum(positions) / len(positions), 1) if positions else None
+        result.append({
+            **client,
+            "total_keywords":    s["total"],
+            "keywords_crescita": s["crescita"],
+            "keywords_calo":     s["calo"],
+            "last_sync":         s["last_sync"],
+            "clicks_curr":       c["clicks"],
+            "impressions_curr":  c["impressions"],
+            "avg_position":      avg_pos,
+            "clicks_trend":      pct_change(c["clicks"],      p["clicks"]),
+            "impressions_trend": pct_change(c["impressions"], p["impressions"]),
+        })
+    return result
 
 
 @router.get("/calendar")
@@ -583,3 +666,39 @@ def get_visibility_history(client_id: str, _user=Depends(get_current_user)):
 
     return {"history": history}
 
+
+@router.get("/{client_id}/summary")
+def get_client_summary(client_id: str, _user=Depends(get_current_user)):
+    """Metriche GSC aggregate + top 5 keyword per click e impressioni (ultimi 28gg)."""
+    kw_res = supabase.table("keyword_history") \
+        .select("keyword, clicks, impressions, ctr, position") \
+        .eq("client_id", client_id) \
+        .not_.is_("clicks", "null") \
+        .execute()
+
+    rows = kw_res.data or []
+    total_clicks      = sum(r.get("clicks") or 0 for r in rows)
+    total_impressions = sum(r.get("impressions") or 0 for r in rows)
+    positions         = [r["position"] for r in rows if r.get("position")]
+    avg_position      = round(sum(positions) / len(positions), 1) if positions else None
+    avg_ctr           = round(sum(r.get("ctr") or 0 for r in rows) / len(rows) * 100, 1) if rows else None
+
+    top_clicks = sorted(
+        [r for r in rows if r.get("clicks")],
+        key=lambda x: x["clicks"],
+        reverse=True
+    )[:5]
+    top_impressions = sorted(
+        [r for r in rows if r.get("impressions")],
+        key=lambda x: x["impressions"],
+        reverse=True
+    )[:5]
+
+    return {
+        "total_clicks":      total_clicks,
+        "total_impressions": total_impressions,
+        "avg_position":      avg_position,
+        "avg_ctr":           avg_ctr,
+        "top_clicks":        top_clicks,
+        "top_impressions":   top_impressions,
+    }
