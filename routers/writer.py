@@ -110,3 +110,55 @@ def get_clients_for_writer(_user=Depends(get_current_user)):
         .order("name") \
         .execute()
     return res.data or []
+
+
+# ══════════════════════════════════════════════
+#  GESTIONE ARTICOLI
+# ══════════════════════════════════════════════
+
+@router.get("/articles")
+def get_articles(
+    client_id: Optional[str] = None,
+    _user=Depends(get_current_user),
+):
+    """Lista tutti i brief con article_output non null."""
+    query = supabase.table("briefs") \
+        .select("id, keyword, market, intent, created_at, client_id, article_output") \
+        .not_.is_("article_output", "null")
+    if client_id:
+        query = query.eq("client_id", client_id)
+    res = query.order("created_at", desc=True).limit(100).execute()
+    return res.data or []
+
+
+class ArticleUpdateRequest(BaseModel):
+    article_output: str
+
+
+@router.patch("/articles/{brief_id}")
+def update_article(
+    brief_id: str,
+    data: ArticleUpdateRequest,
+    _user=Depends(get_current_user),
+):
+    """Aggiorna il testo dell'articolo."""
+    res = supabase.table("briefs") \
+        .update({"article_output": data.article_output}) \
+        .eq("id", brief_id) \
+        .execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Articolo non trovato")
+    return res.data[0]
+
+
+@router.delete("/articles/{brief_id}")
+def delete_article(
+    brief_id: str,
+    _user=Depends(get_current_user),
+):
+    """Azzera article_output senza eliminare il brief."""
+    supabase.table("briefs") \
+        .update({"article_output": None}) \
+        .eq("id", brief_id) \
+        .execute()
+    return {"deleted": brief_id}

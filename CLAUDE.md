@@ -156,6 +156,22 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 - Ora include `brief_output` nei campi selezionati (prima era escluso)
 - Select: `id, keyword, market, intent, created_at, client_id, brief_output`
 
+## Endpoint GET /api/writer/articles (routers/writer.py)
+
+### GET `/api/writer/articles`
+- Protetto con `Depends(get_current_user)`
+- Query param opzionale: `client_id`
+- Restituisce brief con `article_output IS NOT NULL`, ordinati `created_at` desc, limit 100
+- Select: `id, keyword, market, intent, created_at, client_id, article_output`
+
+### PATCH `/api/writer/articles/{brief_id}`
+- Body: `{ article_output: str }` (modello `ArticleUpdateRequest`)
+- Aggiorna `article_output` nel record briefs; 404 se non trovato
+
+### DELETE `/api/writer/articles/{brief_id}`
+- Azzera `article_output = None` — **non elimina il record brief**
+- Response: `{ deleted: brief_id }`
+
 ## Endpoint GET /api/writer/clients (routers/writer.py)
 
 ### GET `/api/writer/clients`
