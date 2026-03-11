@@ -140,6 +140,22 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
   - `clicks_trend`, `impressions_trend` — percentuale variazione vs mese precedente (28-56gg fa); `null` se mese precedente = 0
 - Response: `[{ ...client_fields, total_keywords, keywords_crescita, keywords_calo, last_sync, clicks_curr, impressions_curr, avg_position, clicks_trend, impressions_trend }]`
 
+## Endpoint PATCH /api/seo/briefs/{brief_id} (routers/seo.py)
+
+### PATCH `/api/seo/briefs/{brief_id}`
+- Protetto con `Depends(get_current_user)`
+- Body: `{ brief_output: str }` (modello `BriefUpdateRequest`)
+- Aggiorna il campo `brief_output` nella tabella `briefs`
+- Response: record aggiornato; 404 se non trovato
+
+### DELETE `/api/seo/briefs/{brief_id}`
+- Protetto con `Depends(get_current_user)`
+- Elimina il brief; response: `{ deleted: brief_id }`
+
+### GET `/api/seo/briefs` — aggiornato
+- Ora include `brief_output` nei campi selezionati (prima era escluso)
+- Select: `id, keyword, market, intent, created_at, client_id, brief_output`
+
 ## Endpoint GET /api/writer/clients (routers/writer.py)
 
 ### GET `/api/writer/clients`
