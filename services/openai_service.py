@@ -263,37 +263,28 @@ async def generate_article(
     creativity: float,
     tone_of_voice: str = "",
     products_services: str = "",
+    usp: str = "",
+    client_notes: str = "",
     api_key: str | None = None,
 ) -> str:
     client = _openai_client(api_key)
     word_target = get_word_target(length)
 
-    tone_instruction = f"\n- Tono di voce: {tone_of_voice}." if tone_of_voice else ""
-    products_block = f"\n\nProdotti/servizi del cliente (priorità massima — menziona solo ciò che il cliente offre realmente):\n{products_services}" if products_services else ""
+    # Priorità 1: dati dal profilo cliente (fonte attendibile)
+    # Priorità 2: parsing del testo del brief (fallback)
+    tone_hint     = tone_of_voice.strip() if tone_of_voice else ""
+    products_hint = products_services.strip() if products_services else ""
+    if not tone_hint or not products_hint:
+        for line in brief_text.splitlines():
+            l = line.lower()
+            if not tone_hint and "tone of voice" in l:
+                tone_hint = line.strip()
+            if not products_hint and (
+                "prodotti" in l or "servizi" in l
+            ):
+                products_hint = line.strip()
 
-    system_prompt = f"""Sei un senior SEO copywriter.
-Scrivi contenuti autorevoli ma concreti, senza frasi generiche.
-Stile: chiaro, operativo, orientato a decisioni e casi reali.
-
-Regole:
-- Scrivi in italiano.
-- Maiuscole: sentence case per H1/H2/H3.
-- Evita claim numerici non supportati.
-- Niente "come vedremo", "nel mondo di oggi", "rivoluzionare".{tone_instruction}"""
-
-    user_prompt = f"""
-Brief SEO:
-{brief_text}{products_block}
-    # Estrai tone of voice e prodotti dal brief se presenti
-    tone_hint = ""
-    products_hint = ""
-    for line in brief_text.splitlines():
-        if "tone of voice" in line.lower() and not tone_hint:
-            tone_hint = line.strip()
-        if ("prodotti" in line.lower() or "servizi" in line.lower()) and not products_hint:
-            products_hint = line.strip()
-
-    brand = brand_name if brand_name else "il cliente"
+    brand = brand_name or ""
 
     system_prompt = f"""Sei un senior SEO copywriter italiano.
 Scrivi contenuti concreti, autorevoli e orientati a chi deve prendere una decisione.
@@ -313,7 +304,9 @@ TONO:
 {tone_hint if tone_hint else "Professionale, diretto, concreto. Scrivi come un esperto che parla a un cliente informato."}
 
 BRAND: {brand}
+{f"USP DEL CLIENTE: {usp}" if usp else ""}
 {f"PRODOTTI/SERVIZI DA CITARE: {products_hint}" if products_hint else ""}
+{f"NOTE E VINCOLI (segui alla lettera): {client_notes}" if client_notes else ""}
 """
 
     user_prompt = f"""

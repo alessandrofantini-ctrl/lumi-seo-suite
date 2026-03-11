@@ -140,6 +140,37 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
   - `clicks_trend`, `impressions_trend` — percentuale variazione vs mese precedente (28-56gg fa); `null` se mese precedente = 0
 - Response: `[{ ...client_fields, total_keywords, keywords_crescita, keywords_calo, last_sync, clicks_curr, impressions_curr, avg_position, clicks_trend, impressions_trend }]`
 
+## Endpoint GET /api/writer/clients (routers/writer.py)
+
+### GET `/api/writer/clients`
+- Protetto con `Depends(get_current_user)`
+- Nessun body
+- Restituisce `[{ id, name }]` per tutti i clienti, ordinati per `name` asc
+- Usato dal frontend per popolare il selettore cliente nel redattore
+
+## Endpoint POST /api/writer/generate — parametri aggiornati
+
+`generate_article` in `services/openai_service.py` accetta ora:
+```python
+async def generate_article(
+    brief_text: str, brand_name: str, target_page_url: str,
+    length: str, creativity: float,
+    tone_of_voice: str = "",
+    products_services: str = "",
+    usp: str = "",
+    client_notes: str = "",
+    api_key: str | None = None,
+) -> str:
+```
+- `tone_of_voice`, `products_services`, `usp`, `client_notes` vengono dal profilo cliente
+- Priorità: dati profilo cliente > parsing testo brief (fallback)
+- `client_notes` include vincoli e termini da non usare — iniettato nel system_prompt
+
+`ArticleRequest` ora include `client_id: Optional[str] = None`.
+Il router risolve `client_id` da: `data.client_id` → `brief_record["client_id"]`.
+Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa a `generate_article`.
+`brand_name` auto-popolato dal `name` cliente se non fornito esplicitamente.
+
 ## Endpoint GET /api/clients/{id}/summary (routers/clients.py)
 
 ### GET `/api/clients/{client_id}/summary`
