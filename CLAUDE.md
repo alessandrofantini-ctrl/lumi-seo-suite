@@ -23,7 +23,7 @@ routers/          → HTTP endpoints organizzati per dominio
   seo.py          → analisi SERP + brief generation
   writer.py       → generazione articoli da brief
   migration.py    → mapping redirect 301: analisi CSV Screaming Frog + GPT-4o + export CSV
-  dashboard.py    → vista cross-cliente: metriche keyword trend per tutti i clienti
+  dashboard.py    → vista cross-cliente: usato da app/clients/page.tsx come sorgente dati principale
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
@@ -134,6 +134,7 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 ### GET `/api/dashboard`
 - Protetto con `Depends(get_current_user)`
 - Nessun body — risponde con array JSON
+- **Usato come sorgente dati principale da `app/clients/page.tsx`** (lista clienti + KPI globali)
 - Legge tutti i clienti (`clients`) e tutte le keyword (`keyword_history.client_id, position, position_prev, gsc_updated_at`)
 - Per ogni cliente calcola:
   - `total_keywords`: conteggio righe keyword_history
@@ -142,6 +143,7 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
   - `last_sync`: valore massimo di `gsc_updated_at` tra le keyword del cliente
 - Ordine risposta: `keywords_calo` desc (clienti più critici prima)
 - Response: `[{ id, name, sector, total_keywords, keywords_crescita, keywords_calo, last_sync }]`
+- Nota: `tone_of_voice` non è incluso nella response (il frontend lo mostra se presente, ma non è restituito da questo endpoint)
 
 ## Endpoint migrazione (routers/migration.py)
 
