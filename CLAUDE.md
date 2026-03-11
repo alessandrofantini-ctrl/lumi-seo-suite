@@ -129,6 +129,29 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 - Select: `id, keyword, status, planned_month, client_id, cluster, intent, priority, clients(id, name)`
 - IMPORTANTE: questa route è definita PRIMA di `/{client_id}` per evitare conflitti FastAPI
 
+## Endpoint GET /api/clients (routers/clients.py)
+
+### GET `/api/clients`
+- Protetto con `Depends(get_current_user)`
+- Aggrega dati da `keyword_position_history` (ultimi 28gg e 28-56gg fa) e `keyword_history`
+- Campi aggiuntivi per ogni cliente rispetto ai dati base della tabella `clients`:
+  - `total_keywords`, `keywords_crescita`, `keywords_calo`, `last_sync` — trend keyword (posizione vs position_prev)
+  - `clicks_curr`, `impressions_curr`, `avg_position` — metriche GSC aggregate ultimi 28gg da `keyword_position_history`
+  - `clicks_trend`, `impressions_trend` — percentuale variazione vs mese precedente (28-56gg fa); `null` se mese precedente = 0
+- Response: `[{ ...client_fields, total_keywords, keywords_crescita, keywords_calo, last_sync, clicks_curr, impressions_curr, avg_position, clicks_trend, impressions_trend }]`
+
+## Endpoint GET /api/clients/{id}/summary (routers/clients.py)
+
+### GET `/api/clients/{client_id}/summary`
+- Protetto con `Depends(get_current_user)`
+- Aggrega metriche GSC da `keyword_history` (campi `clicks`, `impressions`, `ctr`, `position`)
+- Response:
+  - `total_clicks`, `total_impressions` — somma di tutti i click/impressioni keyword del cliente
+  - `avg_position` — media posizione (arrotondata a 1 decimale); `null` se nessuna keyword con posizione
+  - `avg_ctr` — CTR medio in % (arrotondato a 1 decimale); `null` se nessuna keyword
+  - `top_clicks` — top 5 keyword ordinate per click desc
+  - `top_impressions` — top 5 keyword ordinate per impressioni desc
+
 ## Endpoint dashboard (routers/dashboard.py)
 
 ### GET `/api/dashboard`
