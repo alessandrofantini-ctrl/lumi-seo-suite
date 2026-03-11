@@ -189,8 +189,43 @@ def get_brief(brief_id: str, _user=Depends(get_current_user)):
 @router.get("/briefs")
 def get_all_briefs(client_id: Optional[str] = None, _user=Depends(get_current_user)):
     """Recupera tutti i brief, opzionalmente filtrati per cliente."""
-    query = supabase.table("briefs").select("id, keyword, market, intent, created_at, client_id")
+    query = supabase.table("briefs").select(
+        "id, keyword, market, intent, created_at, client_id, brief_output"
+    )
     if client_id:
         query = query.eq("client_id", client_id)
     res = query.order("created_at", desc=True).limit(50).execute()
     return res.data
+
+
+class BriefUpdateRequest(BaseModel):
+    brief_output: str
+
+
+@router.patch("/briefs/{brief_id}")
+def update_brief(
+    brief_id: str,
+    data: BriefUpdateRequest,
+    _user=Depends(get_current_user),
+):
+    """Aggiorna il testo di un brief esistente."""
+    res = supabase.table("briefs") \
+        .update({"brief_output": data.brief_output}) \
+        .eq("id", brief_id) \
+        .execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Brief non trovato")
+    return res.data[0]
+
+
+@router.delete("/briefs/{brief_id}")
+def delete_brief(
+    brief_id: str,
+    _user=Depends(get_current_user),
+):
+    """Elimina un brief."""
+    supabase.table("briefs") \
+        .delete() \
+        .eq("id", brief_id) \
+        .execute()
+    return {"deleted": brief_id}
