@@ -266,37 +266,74 @@ async def generate_article(
     client = _openai_client(api_key)
     word_target = get_word_target(length)
 
-    system_prompt = """
-Sei un senior SEO copywriter.
-Scrivi contenuti autorevoli ma concreti, senza frasi generiche.
-Stile: chiaro, operativo, orientato a decisioni e casi reali.
+    # Estrai tone of voice e prodotti dal brief se presenti
+    tone_hint = ""
+    products_hint = ""
+    for line in brief_text.splitlines():
+        if "tone of voice" in line.lower() and not tone_hint:
+            tone_hint = line.strip()
+        if ("prodotti" in line.lower() or "servizi" in line.lower()) and not products_hint:
+            products_hint = line.strip()
 
-Regole:
-- Scrivi in italiano.
-- Maiuscole: sentence case per H1/H2/H3.
-- Evita claim numerici non supportati.
-- Niente "come vedremo", "nel mondo di oggi", "rivoluzionare".
+    brand = brand_name if brand_name else "il cliente"
+
+    system_prompt = f"""Sei un senior SEO copywriter italiano.
+Scrivi contenuti concreti, autorevoli e orientati a chi deve prendere una decisione.
+
+REGOLE ASSOLUTE:
+- Scrivi SEMPRE in italiano
+- Sentence case per tutti i titoli (H1, H2, H3)
+- Segui esattamente l'outline del brief — non inventare sezioni, non saltarne
+- Ogni H2 deve avere una struttura diversa dalle altre (non tutti paragrafi narrativi)
+  Alterna: lista pratica / confronto / scenario reale / errore comune / mini-checklist
+- Zero frasi di apertura generiche: niente "Nel mondo di oggi", "È fondamentale",
+  "In questa guida", "Come vedremo"
+- Zero claim numerici senza fonte (no "il 90% delle aziende...")
+- Non menzionare mai competitor per nome
+
+TONO:
+{tone_hint if tone_hint else "Professionale, diretto, concreto. Scrivi come un esperto che parla a un cliente informato."}
+
+BRAND: {brand}
+{f"PRODOTTI/SERVIZI DA CITARE: {products_hint}" if products_hint else ""}
 """
 
     user_prompt = f"""
-Brief SEO:
+Brief SEO completo:
 {brief_text}
 
-Dati fissi:
-- Brand: "{brand_name}"
-- Lunghezza minima: {word_target} parole
-- URL CTA (se presente): "{target_page_url}"
+---
 
-Scrivi l'articolo completo seguendo esattamente l'outline del brief.
+ISTRUZIONI DI SCRITTURA:
 
-Requisiti:
-1) Introduzione 150-220 parole con keyword naturale e promessa al lettore.
-2) Per ogni H2: esempio concreto, checklist o mini-framework, errore comune da evitare.
-3) Massimo 1-2 tabelle solo se aiutano una decisione.
-4) FAQ: 5 domande orientate a dubbi reali (costi, tempi, rischi).
-5) CTA finale: 2-3 CTA brevi e concrete.
+Lunghezza minima: {word_target} parole
+{f"URL per CTA: {target_page_url}" if target_page_url else ""}
 
-Output: solo Markdown dell'articolo, senza commenti extra.
+**INTRODUZIONE (150–220 parole)**
+Inizia con un hook diretto: una domanda provocatoria, un dato concreto,
+o uno scenario riconoscibile dal target. NON iniziare con la keyword.
+Seconda frase: aggancia il problema reale del lettore.
+Chiudi l'intro con una promessa specifica su cosa troverà nell'articolo.
+
+**CORPO DELL'ARTICOLO**
+Segui esattamente l'outline H2/H3 del brief.
+Per ogni H2:
+- Applica il tone of voice indicato nel brief
+- Includi almeno un riferimento concreto ai prodotti/servizi di {brand}
+- Usa una struttura diversa dalle altre sezioni (lista / confronto / scenario / checklist)
+- Se nel brief c'è una "Nota redazionale" per quella sezione, seguila alla lettera
+
+**FAQ**
+Usa le domande indicate nel brief.
+Risposte dirette, max 3 frasi. Almeno 2 risposte devono citare
+un prodotto/servizio specifico di {brand}.
+
+**CONCLUSIONE (80–120 parole)**
+Non riassumere l'articolo — è la parte che il lettore ricorda.
+Struttura: 1) insight finale che cambia prospettiva, 2) CTA concreta e specifica.
+{f"CTA deve linkare a: {target_page_url}" if target_page_url else ""}
+
+Output: solo Markdown dell'articolo. Nessun commento, nessuna premessa.
 """
 
     resp = await client.chat.completions.create(
