@@ -361,6 +361,18 @@ def update_keyword(client_id: str, keyword_id: str, data: KeywordUpdate, _user=D
     if not payload:
         raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
 
+    if data.planned_month:
+        try:
+            dt = datetime.strptime(data.planned_month, "%Y-%m")
+            payload["planned_month"] = dt.strftime("%Y-%m-01")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="planned_month deve essere in formato YYYY-MM"
+            )
+    elif data.planned_month == "":
+        payload["planned_month"] = None
+
     res = (
         supabase.table("keyword_history")
         .update(payload)
