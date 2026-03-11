@@ -49,23 +49,30 @@ async def generate(
         raise HTTPException(status_code=400, detail="Devi fornire un brief_id o un brief_text")
 
     # Risolvi client_id: da request → dal brief record
-    client_id = data.client_id
-    if not client_id and brief_record:
-        client_id = brief_record.get("client_id")
+    resolved_client_id = data.client_id or (
+        brief_record.get("client_id") if brief_record else None
+    )
 
-    # Carica profilo cliente per contesto (tone_of_voice, products_services, brand_name)
-    tone_of_voice = ""
+    # Carica profilo cliente completo se disponibile
+    tone_of_voice     = ""
     products_services = ""
-    brand_name = data.brand_name or ""
+    usp               = ""
+    client_notes      = ""
+    brand_name        = data.brand_name or ""
 
-    if client_id:
-        client_res = supabase.table("clients").select("name, tone_of_voice, products_services").eq("id", client_id).single().execute()
+    if resolved_client_id:
+        client_res = supabase.table("clients") \
+            .select("name, tone_of_voice, products_services, usp, notes") \
+            .eq("id", resolved_client_id) \
+            .single() \
+            .execute()
         if client_res.data:
-            profile = client_res.data
-            tone_of_voice = profile.get("tone_of_voice") or ""
-            products_services = profile.get("products_services") or ""
+            tone_of_voice     = client_res.data.get("tone_of_voice") or ""
+            products_services = client_res.data.get("products_services") or ""
+            usp               = client_res.data.get("usp") or ""
+            client_notes      = client_res.data.get("notes") or ""
             if not brand_name:
-                brand_name = profile.get("name") or ""
+                brand_name = client_res.data.get("name") or ""
 
     # Genera l'articolo
     article = await generate_article(
@@ -76,6 +83,8 @@ async def generate(
         creativity=data.creativity,
         tone_of_voice=tone_of_voice,
         products_services=products_services,
+        usp=usp,
+        client_notes=client_notes,
         api_key=x_openai_key,
     )
 
@@ -87,3 +96,17 @@ async def generate(
         "brief_id": data.brief_id,
         "article": article,
     }
+
+
+# ══════════════════════════════════════════════
+#  LISTA CLIENTI (per selettore nel redattore)
+# ══════════════════════════════════════════════
+
+@router.get("/clients")
+def get_clients_for_writer(_user=Depends(get_current_user)):
+    """Restituisce id + name di tutti i clienti, ordinati per nome."""
+    res = supabase.table("clients") \
+        .select("id, name") \
+        .order("name") \
+        .execute()
+    return res.data or []
