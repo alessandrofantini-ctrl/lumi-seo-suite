@@ -14,6 +14,7 @@ router = APIRouter()
 class ArticleRequest(BaseModel):
     brief_id: Optional[str] = None        # se vuoi caricare il brief da Supabase
     brief_text: Optional[str] = None      # oppure incollarlo direttamente
+    client_id: Optional[str] = None       # se presente, carica profilo cliente per contesto
     brand_name: Optional[str] = ""
     target_page_url: Optional[str] = ""
     length: Optional[str] = "Long form"   # Standard | Long form | Authority guide
@@ -47,13 +48,34 @@ async def generate(
     if not brief_text:
         raise HTTPException(status_code=400, detail="Devi fornire un brief_id o un brief_text")
 
+    # Risolvi client_id: da request → dal brief record
+    client_id = data.client_id
+    if not client_id and brief_record:
+        client_id = brief_record.get("client_id")
+
+    # Carica profilo cliente per contesto (tone_of_voice, products_services, brand_name)
+    tone_of_voice = ""
+    products_services = ""
+    brand_name = data.brand_name or ""
+
+    if client_id:
+        client_res = supabase.table("clients").select("name, tone_of_voice, products_services").eq("id", client_id).single().execute()
+        if client_res.data:
+            profile = client_res.data
+            tone_of_voice = profile.get("tone_of_voice") or ""
+            products_services = profile.get("products_services") or ""
+            if not brand_name:
+                brand_name = profile.get("name") or ""
+
     # Genera l'articolo
     article = await generate_article(
         brief_text=brief_text,
-        brand_name=data.brand_name,
+        brand_name=brand_name,
         target_page_url=data.target_page_url,
         length=data.length,
         creativity=data.creativity,
+        tone_of_voice=tone_of_voice,
+        products_services=products_services,
         api_key=x_openai_key,
     )
 
