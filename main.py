@@ -2,7 +2,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import clients, seo, writer, migration, migrations_archive, dashboard
+from routers import clients, seo, writer, migration, migrations_archive, dashboard, admin, auth_router
 
 # DataForSEO — credenziali lato server (non via header HTTP)
 # Impostare come variabili d'ambiente in Render:
@@ -32,6 +32,8 @@ app.include_router(writer.router,    prefix="/api/writer",    tags=["Redattore"]
 app.include_router(migration.router,           prefix="/api/migration",  tags=["Migrazione"])
 app.include_router(migrations_archive.router, prefix="/api/migrations", tags=["Migrazioni archiviate"])
 app.include_router(dashboard.router,           prefix="/api/dashboard",  tags=["Dashboard"])
+app.include_router(admin.router,              prefix="/api/admin",      tags=["Admin"])
+app.include_router(auth_router.router,        prefix="/api/auth",       tags=["Auth"])
 
 @app.get("/")
 def root():

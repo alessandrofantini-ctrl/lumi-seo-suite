@@ -4,7 +4,8 @@
 Tool interno per HEAD of SEO (Lumi Company). Gestisce clienti SEO, keyword pipeline,
 analisi SERP+competitor scraping, brief generation e article writing tramite GPT-4o.
 
-Utente primario: un singolo SEO specialist (Alessandro). Non è un SaaS multi-tenant.
+Utente primario: HEAD of SEO (Alessandro) con possibilità di invitare SEO specialist.
+Sistema multi-utente con due ruoli: Admin e SEO Specialist (vedi docs/setup-admin.md).
 
 ## Stack
 - FastAPI 0.111 + Python 3.11 — deploy su Render (Procfile)
@@ -23,7 +24,10 @@ routers/          → HTTP endpoints organizzati per dominio
   seo.py          → analisi SERP + brief generation
   writer.py       → generazione articoli da brief
   migration.py    → mapping redirect 301: analisi CSV Screaming Frog + GPT-4o + export CSV
+  migrations_archive.py → archivio migrazioni salvate su Supabase
   dashboard.py    → vista cross-cliente: usato da app/clients/page.tsx come sorgente dati principale
+  admin.py        → gestione utenti e assegnazioni (solo admin): GET/POST/PATCH/DELETE /api/admin/users, GET/PATCH /api/admin/clients
+  auth_router.py  → GET /api/auth/me — profilo utente corrente
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
@@ -283,6 +287,45 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
 - Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
 - Colonne: URL vecchio, URL nuovo, Dominio nuovo, Label dominio, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, Inlinks
 - Tipo match "homepage" → "Homepage fallback" nel CSV
+
+## Sistema multi-utente (migration 011)
+
+### Ruoli
+- `admin`: vede tutti i clienti, può gestire utenti e assegnazioni
+- `specialist`: vede solo clienti dove `owner_id == uid OR assigned_to == uid`
+
+### auth.py — funzioni aggiunte
+- `get_current_user_profile(user=Depends(get_current_user)) -> dict`: ritorna `{ id, email, role, full_name }`; se nessun profilo trovato, usa `role="specialist"` di default
+- `require_admin(profile=Depends(get_current_user_profile)) -> dict`: 403 se non admin
+
+### clients.py — pattern di accesso
+- `check_client_access(client_id, profile)`: utility (non Depends) — 403 se specialist senza accesso
+- `get_all_clients`: filtra per `owner_id`/`assigned_to` se specialist
+- `create_client`: aggiunge `owner_id = profile["id"]` all'insert
+- `get_client`, `update_client`, `delete_client`: chiamano `check_client_access`
+
+### API Admin (routers/admin.py) — solo per admin
+- `GET /api/admin/users` — lista profili
+- `POST /api/admin/users` — crea utente (Supabase Auth Admin + user_profiles)
+- `PATCH /api/admin/users/{id}` — aggiorna ruolo/nome
+- `DELETE /api/admin/users/{id}` — elimina profilo + auth
+- `GET /api/admin/clients` — lista clienti con owner/assigned arricchiti
+- `PATCH /api/admin/clients/{id}/assign` — assegna specialist
+
+### API Auth (routers/auth_router.py)
+- `GET /api/auth/me` — profilo utente corrente
+
+### Script primo admin
+```bash
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=secret ADMIN_NAME="Admin" \
+python scripts/create_first_admin.py
+```
+Vedi `docs/setup-admin.md` per istruzioni complete.
+
+### Database (migration 011)
+- Tabella `user_profiles`: `id, email, full_name, role CHECK (admin|specialist), created_at`
+- `clients.owner_id` (UUID ref auth.users) — impostato alla creazione
+- `clients.assigned_to` (UUID ref auth.users) — impostato dall'admin
 
 ## Come aggiungere un endpoint
 
