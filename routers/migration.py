@@ -19,15 +19,15 @@ router = APIRouter()
 
 class MigrationResult(BaseModel):
     old_url: str
-    old_title: str
-    old_h1: str
-    old_inlinks: int
+    old_title: str = ""
+    old_h1: str = ""
+    old_inlinks: int = 0
     new_url: Optional[str] = None
     new_title: Optional[str] = None
     target_domain: Optional[str] = None   # dominio nuovo di destinazione
     target_label: Optional[str] = None    # label opzionale del dominio nuovo
-    confidence: int
-    match_type: str   # exact | slug | gpt | no_match | eliminated | consolidated
+    confidence: int = 0
+    match_type: str   # exact | slug | gpt | no_match | eliminated | consolidated | homepage
     reason: Optional[str] = None
 
 
@@ -493,7 +493,7 @@ async def analyze_migration(
     all_results: list[dict] = []
     all_stats: dict[str, int] = {
         "exact": 0, "slug": 0, "gpt": 0,
-        "no_match": 0, "eliminated": 0, "consolidated": 0,
+        "no_match": 0, "eliminated": 0, "consolidated": 0, "homepage": 0,
     }
 
     if not language_rules:
@@ -615,6 +615,29 @@ async def analyze_migration(
             for k in ("exact", "slug", "gpt", "no_match"):
                 all_stats[k] += fb_stats.get(k, 0)
 
+    # ── Homepage fallback — converte no_match in redirect alla homepage ──────
+    fallback_url = None
+    fallback_domain = None
+    fallback_label = None
+    if new_domains_cfg:
+        base = new_domains_cfg[0].get("domain", "").rstrip("/")
+        if base:
+            fallback_url = base + "/"
+            fallback_domain = base
+            fallback_label = new_domains_cfg[0].get("label", "")
+
+    if fallback_url:
+        for r in all_results:
+            if r.get("match_type") == "no_match":
+                r["new_url"]    = fallback_url
+                r["match_type"] = "homepage"
+                r["reason"]     = "Nessuna corrispondenza — redirect alla homepage"
+                r["target_domain"] = fallback_domain
+                r["target_label"]  = fallback_label
+
+    all_stats["homepage"]  = sum(1 for r in all_results if r.get("match_type") == "homepage")
+    all_stats["no_match"]  = sum(1 for r in all_results if r.get("match_type") == "no_match")
+
     matched = (
         all_stats["exact"]
         + all_stats["slug"]
@@ -627,6 +650,7 @@ async def analyze_migration(
         "matched": matched,
         "no_match": all_stats["no_match"],
         "eliminated": all_stats["eliminated"],
+        "homepage": all_stats["homepage"],
         "results": all_results,
         "stats": all_stats,
     }
@@ -677,6 +701,7 @@ def export_csv(
             "no_match":     "Nessuno",
             "eliminated":   "Eliminata",
             "consolidated": "Consolidata",
+            "homepage":     "Homepage fallback",
         }.get(r.match_type, r.match_type)
 
         reason = r.reason or (
