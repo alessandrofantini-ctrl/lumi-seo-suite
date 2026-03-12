@@ -231,6 +231,25 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
 - Response: `[{ id, name, sector, total_keywords, keywords_crescita, keywords_calo, last_sync }]`
 - Nota: `tone_of_voice` non è incluso nella response (il frontend lo mostra se presente, ma non è restituito da questo endpoint)
 
+## Endpoint archivio migrazioni (routers/migrations_archive.py)
+
+### POST `/api/migrations`
+- Protetto con `Depends(get_current_user)`
+- Body: `MigrationSaveRequest` — `name, old_domain, new_domains, results, total_urls, matched_urls`
+- `results` è una lista semplificata `[{ old_url, new_url, match_type, confidence }]`
+- Inserisce in tabella `migrations` (migration 010); response: record inserito
+
+### GET `/api/migrations`
+- Restituisce lista migrazioni ordinate per `created_at` desc
+- Select: `id, name, old_domain, new_domains, total_urls, matched_urls, created_at`
+
+### GET `/api/migrations/{migration_id}`
+- Restituisce il record completo inclusi `results` (JSONB)
+- Usato dal frontend per re-export CSV
+
+### DELETE `/api/migrations/{migration_id}`
+- Elimina il record; response: `{ deleted: migration_id }`
+
 ## Endpoint migrazione (routers/migration.py)
 
 ### POST `/api/migration/analyze`
@@ -251,8 +270,10 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
     - `behavior=consolidated`: matching contro new_csv del dominio di consolidamento, match_type="consolidated"
   - Old pages senza regola corrispondente: fallback su pool combinato di tutti i new CSV
 - `url_to_domain_id` dict inverso: `{new_url → domain_id}` per annotare `target_domain`/`target_label` post-match
-- Risposta: `{ total, matched, no_match, eliminated, results: [...], stats: { exact, slug, gpt, no_match, eliminated, consolidated } }`
-- `MigrationResult` fields: `target_domain` (URL del dominio dest), `target_label` (label opzionale); match_type include "eliminated"|"consolidated"
+- Risposta: `{ total, matched, no_match, eliminated, homepage, results: [...], stats: { exact, slug, gpt, no_match, eliminated, consolidated, homepage } }`
+- `MigrationResult` fields: `target_domain` (URL del dominio dest), `target_label` (label opzionale); match_type include "eliminated"|"consolidated"|"homepage"
+- **Homepage fallback**: dopo il matching, ogni risultato con `match_type="no_match"` viene convertito in `match_type="homepage"` con `new_url` = homepage del primo new_domain (es. `https://www.nuovo.it/`). `no_match` rimane 0 nella risposta finale.
+- `MigrationResult.old_title`, `old_h1`, `old_inlinks` hanno default vuoti per compatibilità con re-export da archivio
 
 ### POST `/api/migration/export-csv`
 - Protetto con `Depends(get_current_user)`
@@ -261,6 +282,7 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
 - Ritorna file CSV (StreamingResponse) con BOM UTF-8 per compatibilità Excel
 - Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
 - Colonne: URL vecchio, URL nuovo, Dominio nuovo, Label dominio, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, Inlinks
+- Tipo match "homepage" → "Homepage fallback" nel CSV
 
 ## Come aggiungere un endpoint
 
