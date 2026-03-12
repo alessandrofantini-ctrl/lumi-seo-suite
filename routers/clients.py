@@ -10,7 +10,7 @@ from database import supabase
 from services.scraper import scrape_client_deep
 from services.openai_service import generate_profile_from_url
 from services.dataforseo import get_search_volume
-from auth import get_current_user
+from auth import get_current_user, get_current_user_profile
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +75,45 @@ class KeywordUpdate(BaseModel):
     planned_month: Optional[str] = None  # formato "YYYY-MM"
 
 # ══════════════════════════════════════════════
+#  UTILITY — controllo accesso cliente
+# ══════════════════════════════════════════════
+
+def check_client_access(client_id: str, profile: dict):
+    """Lancia 403 se lo specialist non ha accesso al cliente."""
+    if profile["role"] == "admin":
+        return  # admin vede tutto
+    res = supabase.table("clients") \
+        .select("owner_id, assigned_to") \
+        .eq("id", client_id) \
+        .single() \
+        .execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Cliente non trovato")
+    c = res.data
+    if (c.get("owner_id") != profile["id"]
+            and c.get("assigned_to") != profile["id"]):
+        raise HTTPException(status_code=403, detail="Accesso negato")
+
+
+# ══════════════════════════════════════════════
 #  ROUTE CLIENTI
 # ══════════════════════════════════════════════
 
 @router.get("/")
-def get_all_clients(_user=Depends(get_current_user)):
+def get_all_clients(profile=Depends(get_current_user_profile)):
     """Restituisce tutti i clienti con metriche GSC aggregate e trend mensile."""
     clients_res = supabase.table("clients").select("*").order("name").execute()
-    if not clients_res.data:
+    all_clients = clients_res.data or []
+
+    # Specialist: filtra solo clienti propri o assegnati
+    if profile["role"] != "admin":
+        uid = profile["id"]
+        all_clients = [
+            c for c in all_clients
+            if c.get("owner_id") == uid or c.get("assigned_to") == uid
+        ]
+
+    if not all_clients:
         return []
 
     now        = datetime.utcnow()
@@ -146,7 +177,7 @@ def get_all_clients(_user=Depends(get_current_user)):
         return round(((curr_val - prev_val) / prev_val) * 100, 1)
 
     result = []
-    for client in clients_res.data:
+    for client in all_clients:
         cid = client["id"]
         c   = curr.get(cid, {"clicks": 0, "impressions": 0, "positions": []})
         p   = prev.get(cid, {"clicks": 0, "impressions": 0})
@@ -182,8 +213,9 @@ def get_calendar_keywords(_user=Depends(get_current_user)):
 
 
 @router.get("/{client_id}")
-def get_client(client_id: str, _user=Depends(get_current_user)):
+def get_client(client_id: str, profile=Depends(get_current_user_profile)):
     """Restituisce un singolo cliente con il suo storico keyword."""
+    check_client_access(client_id, profile)
     client = supabase.table("clients").select("*").eq("id", client_id).single().execute()
     if not client.data:
         raise HTTPException(status_code=404, detail="Cliente non trovato")
@@ -213,19 +245,22 @@ def get_client(client_id: str, _user=Depends(get_current_user)):
 
 
 @router.post("/")
-def create_client(data: ClientCreate, _user=Depends(get_current_user)):
+def create_client(data: ClientCreate, profile=Depends(get_current_user_profile)):
     """Crea un nuovo cliente."""
     existing = supabase.table("clients").select("id").eq("name", data.name).execute()
     if existing.data:
         raise HTTPException(status_code=409, detail=f"Cliente '{data.name}' già esistente")
 
-    res = supabase.table("clients").insert(data.model_dump()).execute()
+    insert_dict = data.model_dump()
+    insert_dict["owner_id"] = profile["id"]
+    res = supabase.table("clients").insert(insert_dict).execute()
     return res.data[0]
 
 
 @router.put("/{client_id}")
-def update_client(client_id: str, data: ClientUpdate, _user=Depends(get_current_user)):
+def update_client(client_id: str, data: ClientUpdate, profile=Depends(get_current_user_profile)):
     """Aggiorna un cliente esistente."""
+    check_client_access(client_id, profile)
     payload = {k: v for k, v in data.model_dump().items() if v is not None}
     payload["updated_at"] = datetime.now().isoformat()
 
@@ -236,8 +271,9 @@ def update_client(client_id: str, data: ClientUpdate, _user=Depends(get_current_
 
 
 @router.delete("/{client_id}")
-def delete_client(client_id: str, _user=Depends(get_current_user)):
+def delete_client(client_id: str, profile=Depends(get_current_user_profile)):
     """Elimina un cliente e tutto il suo storico (cascade)."""
+    check_client_access(client_id, profile)
     supabase.table("clients").delete().eq("id", client_id).execute()
     return {"deleted": True}
 
