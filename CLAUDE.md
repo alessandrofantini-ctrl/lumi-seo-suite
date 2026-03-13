@@ -4,7 +4,8 @@
 Tool interno per HEAD of SEO (Lumi Company). Gestisce clienti SEO, keyword pipeline,
 analisi SERP+competitor scraping, brief generation e article writing tramite GPT-4o.
 
-Utente primario: un singolo SEO specialist (Alessandro). Non è un SaaS multi-tenant.
+Utente primario: HEAD of SEO (Alessandro) con possibilità di invitare SEO specialist.
+Sistema multi-utente con due ruoli: Admin e SEO Specialist (vedi docs/setup-admin.md).
 
 ## Stack
 - FastAPI 0.111 + Python 3.11 — deploy su Render (Procfile)
@@ -23,7 +24,10 @@ routers/          → HTTP endpoints organizzati per dominio
   seo.py          → analisi SERP + brief generation
   writer.py       → generazione articoli da brief
   migration.py    → mapping redirect 301: analisi CSV Screaming Frog + GPT-4o + export CSV
+  migrations_archive.py → archivio migrazioni salvate su Supabase
   dashboard.py    → vista cross-cliente: usato da app/clients/page.tsx come sorgente dati principale
+  admin.py        → gestione utenti e assegnazioni (solo admin): GET/POST/PATCH/DELETE /api/admin/users, GET/PATCH /api/admin/clients
+  auth_router.py  → GET /api/auth/me — profilo utente corrente
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
@@ -268,6 +272,25 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
 - Response: `[{ id, name, sector, total_keywords, keywords_crescita, keywords_calo, last_sync }]`
 - Nota: `tone_of_voice` non è incluso nella response (il frontend lo mostra se presente, ma non è restituito da questo endpoint)
 
+## Endpoint archivio migrazioni (routers/migrations_archive.py)
+
+### POST `/api/migrations`
+- Protetto con `Depends(get_current_user)`
+- Body: `MigrationSaveRequest` — `name, old_domain, new_domains, results, total_urls, matched_urls`
+- `results` è una lista semplificata `[{ old_url, new_url, match_type, confidence }]`
+- Inserisce in tabella `migrations` (migration 010); response: record inserito
+
+### GET `/api/migrations`
+- Restituisce lista migrazioni ordinate per `created_at` desc
+- Select: `id, name, old_domain, new_domains, total_urls, matched_urls, created_at`
+
+### GET `/api/migrations/{migration_id}`
+- Restituisce il record completo inclusi `results` (JSONB)
+- Usato dal frontend per re-export CSV
+
+### DELETE `/api/migrations/{migration_id}`
+- Elimina il record; response: `{ deleted: migration_id }`
+
 ## Endpoint migrazione (routers/migration.py)
 
 ### POST `/api/migration/analyze`
@@ -288,8 +311,10 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
     - `behavior=consolidated`: matching contro new_csv del dominio di consolidamento, match_type="consolidated"
   - Old pages senza regola corrispondente: fallback su pool combinato di tutti i new CSV
 - `url_to_domain_id` dict inverso: `{new_url → domain_id}` per annotare `target_domain`/`target_label` post-match
-- Risposta: `{ total, matched, no_match, eliminated, results: [...], stats: { exact, slug, gpt, no_match, eliminated, consolidated } }`
-- `MigrationResult` fields: `target_domain` (URL del dominio dest), `target_label` (label opzionale); match_type include "eliminated"|"consolidated"
+- Risposta: `{ total, matched, no_match, eliminated, homepage, results: [...], stats: { exact, slug, gpt, no_match, eliminated, consolidated, homepage } }`
+- `MigrationResult` fields: `target_domain` (URL del dominio dest), `target_label` (label opzionale); match_type include "eliminated"|"consolidated"|"homepage"
+- **Homepage fallback**: dopo il matching, ogni risultato con `match_type="no_match"` viene convertito in `match_type="homepage"` con `new_url` = homepage del primo new_domain (es. `https://www.nuovo.it/`). `no_match` rimane 0 nella risposta finale.
+- `MigrationResult.old_title`, `old_h1`, `old_inlinks` hanno default vuoti per compatibilità con re-export da archivio
 
 ### POST `/api/migration/export-csv`
 - Protetto con `Depends(get_current_user)`
@@ -298,6 +323,46 @@ Carica `name, tone_of_voice, products_services, usp, notes` da `clients` e passa
 - Ritorna file CSV (StreamingResponse) con BOM UTF-8 per compatibilità Excel
 - Header: `Content-Disposition: attachment; filename=migration_mapping.csv`
 - Colonne: URL vecchio, URL nuovo, Dominio nuovo, Label dominio, Confidenza %, Tipo match, Motivo, Title vecchio, Title nuovo, H1 vecchio, Inlinks
+- Tipo match "homepage" → "Homepage fallback" nel CSV
+
+## Sistema multi-utente (migration 011)
+
+### Ruoli
+- `admin`: vede tutti i clienti, può gestire utenti e assegnazioni
+- `specialist`: vede solo clienti dove `owner_id == uid OR assigned_to == uid`
+
+### auth.py — funzioni aggiunte
+- `get_current_user_profile(user=Depends(get_current_user)) -> dict`: ritorna `{ id, email, role, full_name }`; se nessun profilo trovato, usa `role="specialist"` di default
+- `require_admin(profile=Depends(get_current_user_profile)) -> dict`: 403 se non admin
+
+### clients.py — pattern di accesso
+- `check_client_access(client_id, profile)`: utility (non Depends) — 403 se specialist senza accesso
+- `get_all_clients`: filtra per `owner_id`/`assigned_to` se specialist
+- `create_client`: aggiunge `owner_id = profile["id"]` all'insert
+- `get_client`, `update_client`, `delete_client`: chiamano `check_client_access`
+
+### API Admin (routers/admin.py) — solo per admin
+- `GET /api/admin/users` — lista profili
+- `POST /api/admin/users` — crea utente (Supabase Auth Admin + user_profiles)
+- `PATCH /api/admin/users/{id}` — aggiorna ruolo/nome
+- `DELETE /api/admin/users/{id}` — elimina profilo + auth
+- `GET /api/admin/clients` — lista clienti con owner/assigned arricchiti
+- `PATCH /api/admin/clients/{id}/assign` — assegna specialist
+
+### API Auth (routers/auth_router.py)
+- `GET /api/auth/me` — profilo utente corrente
+
+### Script primo admin
+```bash
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=secret ADMIN_NAME="Admin" \
+python scripts/create_first_admin.py
+```
+Vedi `docs/setup-admin.md` per istruzioni complete.
+
+### Database (migration 011)
+- Tabella `user_profiles`: `id, email, full_name, role CHECK (admin|specialist), created_at`
+- `clients.owner_id` (UUID ref auth.users) — impostato alla creazione
+- `clients.assigned_to` (UUID ref auth.users) — impostato dall'admin
 
 ## Come aggiungere un endpoint
 

@@ -20,25 +20,27 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         )
 
 
-def get_current_user_profile(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Come get_current_user, ma arricchisce con il profilo (role) da Supabase.
-    Ritorna: { id, user_id, email, role }
-    Il campo 'role' viene letto dalla tabella 'profiles'.
-    Default: 'specialist' se il profilo non esiste o il campo è assente.
-    """
-    try:
-        response = supabase.auth.get_user(credentials.credentials)
-        if not response.user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token non valido")
-        uid = response.user.id
-        profile_res = supabase.table("profiles").select("role").eq("id", uid).single().execute()
-        role = (profile_res.data or {}).get("role", "specialist") or "specialist"
-        return {"id": uid, "user_id": uid, "email": response.user.email, "role": role}
-    except HTTPException:
-        raise
-    except Exception:
+def get_current_user_profile(user=Depends(get_current_user)) -> dict:
+    """Ritorna user + profilo con ruolo (specialist di default se profilo assente)."""
+    res = supabase.table("user_profiles") \
+        .select("*") \
+        .eq("id", user["user_id"]) \
+        .single() \
+        .execute()
+    profile = res.data or {}
+    return {
+        "id":        user["user_id"],
+        "email":     user["email"],
+        "role":      profile.get("role", "specialist"),
+        "full_name": profile.get("full_name", ""),
+    }
+
+
+def require_admin(profile=Depends(get_current_user_profile)) -> dict:
+    """Dependency che blocca se l'utente non è admin."""
+    if profile["role"] != "admin":
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token non valido o scaduto",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=403,
+            detail="Accesso riservato agli amministratori",
         )
+    return profile
