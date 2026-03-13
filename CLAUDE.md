@@ -144,6 +144,43 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
   - `clicks_trend`, `impressions_trend` — percentuale variazione vs mese precedente (28-56gg fa); `null` se mese precedente = 0
 - Response: `[{ ...client_fields, total_keywords, keywords_crescita, keywords_calo, last_sync, clicks_curr, impressions_curr, avg_position, clicks_trend, impressions_trend }]`
 
+## Analisi SEO asincrona — tabella seo_jobs (routers/seo.py)
+
+### Tabella `seo_jobs` (migration 012)
+```
+id          UUID PK
+user_id     UUID → auth.users
+client_id   UUID → clients
+keyword     TEXT
+market      TEXT
+intent      TEXT
+status      TEXT CHECK ('pending','running','done','error')
+result      JSONB  ← popolato al completamento
+error       TEXT   ← popolato in caso di errore
+created_at, updated_at  TIMESTAMPTZ
+```
+
+### Flusso asincrono
+1. `POST /api/seo/analyse` — valida il mercato, crea un job `pending` in `seo_jobs`, avvia `_run_analysis` come BackgroundTask FastAPI, ritorna `{ job_id, status: "pending" }` immediatamente.
+2. `_run_analysis(job_id, data, x_openai_key, x_serpapi_key, user_id)` — funzione `async` che:
+   - Marca il job `running`
+   - Esegue l'intera pipeline: SERP → client context → scraping competitor → aggregate insights → genera brief GPT-4o → salva brief in `briefs`
+   - Marca il job `done` con `result: { brief_id, brief_output, serp_snapshot, competitors_analysed, aggregated_insights }`
+   - In caso di eccezione: marca il job `error` con `error: str(e)`
+3. `GET /api/seo/jobs/{job_id}` — polling stato job (singolo record `seo_jobs`)
+4. `GET /api/seo/jobs` — lista ultimi 20 job dell'utente corrente (senza `result` JSONB completo)
+
+### Endpoint GET /api/seo/jobs/{job_id}
+- Protetto con `Depends(get_current_user)`
+- Ritorna il record completo `seo_jobs` incluso `result` JSONB
+- 404 se non trovato
+
+### Endpoint GET /api/seo/jobs
+- Protetto con `Depends(get_current_user)`
+- Filtra per `user_id = _user["user_id"]`
+- Ordine: `created_at desc`, limit 20
+- Select: `id, keyword, market, intent, status, created_at, updated_at` (no result JSONB)
+
 ## Endpoint PATCH /api/seo/briefs/{brief_id} (routers/seo.py)
 
 ### PATCH `/api/seo/briefs/{brief_id}`
