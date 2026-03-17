@@ -196,6 +196,24 @@ def get_all_clients(profile=Depends(get_current_user_profile)):
             "clicks_trend":      pct_change(c["clicks"],      p["clicks"]),
             "impressions_trend": pct_change(c["impressions"], p["impressions"]),
         })
+    from services.gsc import fetch_gsc_site_metrics
+    for client in result:
+        gsc_prop = client.get("gsc_property")
+        if gsc_prop:
+            try:
+                site_metrics_curr = fetch_gsc_site_metrics(gsc_prop, days=28)
+                site_metrics_prev = fetch_gsc_site_metrics(gsc_prop, days=56)
+                # Isola i 28gg precedenti sottraendo il periodo corrente dal cumulativo 56gg
+                prev_clicks      = site_metrics_prev["clicks"] - site_metrics_curr["clicks"]
+                prev_impressions = site_metrics_prev["impressions"] - site_metrics_curr["impressions"]
+                client["clicks_curr"]        = site_metrics_curr["clicks"]
+                client["impressions_curr"]   = site_metrics_curr["impressions"]
+                client["avg_position"]       = site_metrics_curr["avg_position"]
+                client["clicks_trend"]       = pct_change(site_metrics_curr["clicks"], prev_clicks)
+                client["impressions_trend"]  = pct_change(site_metrics_curr["impressions"], prev_impressions)
+            except Exception:
+                pass  # se GSC fallisce, lascia i valori calcolati da keyword_position_history
+
     return result
 
 
@@ -525,7 +543,7 @@ def clear_keywords(client_id: str, _user=Depends(get_current_user)):
 @router.post("/{client_id}/gsc-sync")
 def gsc_sync(client_id: str, _user=Depends(get_current_user)):
     """Sincronizza i dati di Google Search Console per un cliente."""
-    from services.gsc import fetch_gsc_queries
+    from services.gsc import fetch_gsc_queries, fetch_gsc_site_metrics
 
     client = supabase.table("clients").select("gsc_property").eq("id", client_id).single().execute()
     if not client.data or not client.data.get("gsc_property"):

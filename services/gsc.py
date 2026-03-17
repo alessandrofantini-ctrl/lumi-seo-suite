@@ -88,3 +88,30 @@ def fetch_gsc_page_metrics(property_url: str, page_url: str) -> dict | None:
         "ctr":         round(r.get("ctr", 0.0), 4),
         "position":    round(r.get("position", 0.0), 1),
     }
+
+
+def fetch_gsc_site_metrics(site_url: str, days: int = 28) -> dict:
+    """
+    Metriche aggregate del sito intero (ultimi N giorni).
+    Ritorna { clicks, impressions, ctr, avg_position }
+    """
+    end = date.today() - timedelta(days=3)
+    start = end - timedelta(days=days)
+    service = _get_service()
+    body = {
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "dimensions": [],  # nessuna dimensione = totale sito
+        "rowLimit": 1,
+    }
+    resp = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+    rows = resp.get("rows", [])
+    if not rows:
+        return {"clicks": 0, "impressions": 0, "ctr": 0.0, "avg_position": None}
+    r = rows[0]
+    return {
+        "clicks":       int(r.get("clicks", 0)),
+        "impressions":  int(r.get("impressions", 0)),
+        "ctr":          round(r.get("ctr", 0.0), 4),
+        "avg_position": round(r.get("position", 0.0), 1),
+    }
