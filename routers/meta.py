@@ -50,7 +50,17 @@ def _parse_sections(doc: Document) -> list[dict]:
     current_lines: list[str] = []
 
     # Parole da ignorare come nome pagina
-    SKIP_NAMES = {"INVIA", "CONTATTI FORM"}
+    SKIP_NAMES = {
+        "INVIA", "CONTATTI FORM",
+        "TITLE", "TITLE:", "DESCRIPTION", "DESCRIPTION:",
+        "H1", "H1:", "H2", "H2:", "H3", "H3:",
+        "SLOGAN", "SLOGAN:",
+        "URL", "URL:",
+        "NOTE", "NOTE:",
+        "--",
+    }
+
+    first_skipped = False
 
     for para in doc.paragraphs:
         text = para.text.strip()
@@ -63,6 +73,7 @@ def _parse_sections(doc: Document) -> list[dict]:
             and len(text) >= 2
             and not text.startswith("URL")
             and not text.startswith("HTTP")
+            and not text.endswith(":")
             and not re.match(r"^[A-Z]{1,3}:\\", text)
             and text not in SKIP_NAMES
             # non è solo simboli o numeri
@@ -70,6 +81,10 @@ def _parse_sections(doc: Document) -> list[dict]:
         )
 
         if is_page_name:
+            # Salta il primo nome-pagina (titolo globale del documento)
+            if not first_skipped:
+                first_skipped = True
+                continue
             # Salva pagina precedente
             if current_page and current_page not in SKIP_NAMES:
                 pages.append({
