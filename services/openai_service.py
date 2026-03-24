@@ -358,3 +358,89 @@ Output: solo Markdown dell'articolo. Nessun commento, nessuna premessa.
     )
 
     return resp.choices[0].message.content
+
+
+# ══════════════════════════════════════════════
+#  GENERAZIONE BATCH BRIEF (H1 + outline + FAQ)
+# ══════════════════════════════════════════════
+
+async def generate_batch_brief(
+    keyword: str,
+    market: str,
+    intent: str,
+    client_context: str,
+    serp_context: str = "",
+    url: str = "",
+    api_key: str | None = None,
+) -> dict:
+    """
+    Genera H1, outline H2/H3 e 8 FAQ per una keyword singola.
+    Usato dal generatore brief batch.
+    Ritorna { h1: str, outline: str, faq_domande: list[str] }
+    """
+    openai_client = _openai_client(api_key)
+
+    url_hint = f"\nURL pagina esistente (ottimizza per questa): {url}" if url else ""
+    serp_hint = f"\n\nDati SERP (usa per contestualizzare l'outline):\n{serp_context[:2000]}" if serp_context else ""
+
+    system_prompt = (
+        "Sei un Senior SEO strategist italiano. "
+        "Produci output strutturati e operativi per copywriter. "
+        "Rispondi SEMPRE e SOLO con un oggetto JSON valido senza markdown o backtick."
+    )
+
+    user_prompt = f"""Genera un brief strutturato per la seguente keyword.
+
+Keyword: "{keyword}"
+Mercato: {market}
+Intento: {intent}{url_hint}
+
+## Profilo cliente
+{client_context}
+{serp_hint}
+
+## OUTPUT atteso (JSON puro)
+{{
+  "h1": "H1 suggerito — sentence case, differenziato dai competitor, riflette il brand",
+  "outline": "## H2 principale\\n### H3 uno\\n### H3 due\\n\\n## H2 secondo\\n### H3 uno\\n...",
+  "faq_domande": [
+    "Domanda 1?",
+    "Domanda 2?",
+    "Domanda 3?",
+    "Domanda 4?",
+    "Domanda 5?",
+    "Domanda 6?",
+    "Domanda 7?",
+    "Domanda 8?"
+  ]
+}}
+
+Regole:
+- h1: unico, sentence case, riflette l'angolo del cliente
+- outline: max 6 H2, ogni H2 con 2-3 H3, in italiano, sentence case, formato markdown
+- faq_domande: esattamente 8 domande reali del target, in italiano
+- Rispondi SOLO con il JSON, nessun testo prima o dopo"""
+
+    resp = await openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
+
+    raw = resp.choices[0].message.content.strip()
+    try:
+        result = json.loads(raw)
+    except Exception:
+        raw = re.sub(r"^```json\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        result = json.loads(raw)
+
+    return {
+        "h1":          result.get("h1", ""),
+        "outline":     result.get("outline", ""),
+        "faq_domande": result.get("faq_domande", []),
+    }
