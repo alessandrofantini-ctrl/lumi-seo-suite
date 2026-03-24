@@ -221,7 +221,11 @@ def aggregate_competitor_insights(competitors: list, target_lang: str) -> dict:
     top_terms = [x for x, _ in Counter([x for x in terms_all if x and x not in STOPWORDS]).most_common(20)]
     top_q     = [normalize_sentence_case(x) for x, _ in Counter([norm(x) for x in q_all if x]).most_common(8)]
 
-    return {"top_h2": top_h2, "top_terms": top_terms, "top_questions": top_q}
+    avg_word_count = round(
+        sum(c.get("word_count", 0) for c in competitors) / max(len(competitors), 1)
+    ) if competitors else 0
+
+    return {"top_h2": top_h2, "top_terms": top_terms, "top_questions": top_q, "avg_word_count": avg_word_count}
 
 # ══════════════════════════════════════════════
 #  SCRAPING PROFONDO CLIENTE

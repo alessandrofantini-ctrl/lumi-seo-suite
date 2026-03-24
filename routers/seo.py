@@ -262,6 +262,47 @@ def list_jobs(_user=Depends(get_current_user)):
 #  ROUTE BRIEF
 # ══════════════════════════════════════════════
 
+@router.post("/batch-brief")
+async def batch_brief(
+    data: BatchBriefRequest,
+    _user=Depends(get_current_user),
+    x_openai_key: Optional[str] = Header(default=None),
+):
+    """Genera H1 + outline + 8 FAQ per una keyword singola (batch generator)."""
+    from services.openai_service import generate_batch_brief
+
+    res = supabase.table("clients").select(
+        "name, tone_of_voice, usp, products_services, notes"
+    ).eq("id", data.client_id).single().execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Cliente non trovato")
+
+    cd = res.data
+    client_context_parts = [
+        f"- Cliente: {cd.get('name', '')}",
+        f"- Tone of voice: {cd.get('tone_of_voice', '')}",
+        f"- USP: {cd.get('usp', '')}",
+        f"- Prodotti/servizi: {cd.get('products_services', '')}",
+        f"- Note strategiche: {cd.get('notes', '')}",
+    ]
+    client_context = "\n".join(p for p in client_context_parts if p.split(": ", 1)[-1].strip())
+
+    try:
+        result = await generate_batch_brief(
+            keyword=data.keyword,
+            market=data.market,
+            intent=data.intent,
+            client_context=client_context,
+            serp_context=data.serp_context or "",
+            url=data.url or "",
+            api_key=x_openai_key,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return result
+
+
 @router.get("/briefs/{brief_id}")
 def get_brief(brief_id: str, _user=Depends(get_current_user)):
     """Recupera un brief salvato."""
@@ -281,6 +322,15 @@ def get_all_briefs(client_id: Optional[str] = None, _user=Depends(get_current_us
         query = query.eq("client_id", client_id)
     res = query.order("created_at", desc=True).limit(50).execute()
     return res.data
+
+
+class BatchBriefRequest(BaseModel):
+    keyword: str
+    market: str
+    intent: str
+    url: Optional[str] = None
+    client_id: str
+    serp_context: Optional[str] = None
 
 
 class BriefUpdateRequest(BaseModel):
