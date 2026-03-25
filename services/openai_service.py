@@ -364,83 +364,130 @@ Output: solo Markdown dell'articolo. Nessun commento, nessuna premessa.
 #  GENERAZIONE BATCH BRIEF (H1 + outline + FAQ)
 # ══════════════════════════════════════════════
 
+def build_batch_brief_system_prompt(client: dict) -> str:
+    """
+    Costruisce il system prompt GPT-4o in modo dinamico.
+    Base generica valida per tutti i clienti + istruzioni custom da client.notes.
+    Nessuna logica hardcoded per cliente specifico — le istruzioni custom
+    (es. placeholder marchi, verticale settoriale) vivono nelle note del cliente in DB.
+    """
+    base = (
+        "Sei un esperto SEO specializzato nella creazione di brief editoriali per category page. "
+        "Crei contenuti ottimizzati per buyer tecnici e utenti con alta intenzione d'acquisto.\n\n"
+        "Regole generali:\n"
+        "- Output in italiano\n"
+        "- Stile tecnico e concreto, niente fuffa\n"
+        "- Sentence case (solo prima lettera maiuscola nei titoli)\n"
+        "- Niente numeri inventati o claim non verificabili\n"
+        "- Rispondi SOLO con JSON valido, nessun testo prima o dopo, nessun backtick markdown"
+    )
+    notes = (client.get("notes") or "").strip()
+    if notes:
+        base += f"\n\nIstruzioni specifiche per questo cliente:\n{notes}"
+    return base
+
+
 async def generate_batch_brief(
     keyword: str,
     market: str,
     intent: str,
-    client_context: str,
-    serp_context: str = "",
-    url: str = "",
+    client_name: str,
+    client_url: str,
+    tone_of_voice: str,
+    usp: str,
+    client_notes: str,
+    brands: list[str],
+    filters: list[str],
+    competitor_block: list[dict],
+    avg_wc: int,
+    target_range: str,
+    max_h2: int = 8,
+    page_url: str = "",
     api_key: str | None = None,
 ) -> dict:
     """
-    Genera H1, outline H2/H3 e 8 FAQ per una keyword singola.
-    Usato dal generatore brief batch.
-    Ritorna { h1: str, outline: str, faq_domande: list[str] }
+    Genera H1, outline H2/H3 e FAQ per una category page B2B (es. Rexel).
+    Ritorna { h1, lunghezza_consigliata, outline, faq_domande }.
     """
     openai_client = _openai_client(api_key)
+    system_prompt  = build_batch_brief_system_prompt({"notes": client_notes})
 
-    url_hint = f"\nURL pagina esistente (ottimizza per questa): {url}" if url else ""
-    serp_hint = f"\n\nDati SERP (usa per contestualizzare l'outline):\n{serp_context[:2000]}" if serp_context else ""
-
-    system_prompt = (
-        "Sei un Senior SEO strategist italiano. "
-        "Produci output strutturati e operativi per copywriter. "
-        "Rispondi SEMPRE e SOLO con un oggetto JSON valido senza markdown o backtick."
-    )
-
-    user_prompt = f"""Genera un brief strutturato per la seguente keyword.
-
-Keyword: "{keyword}"
-Mercato: {market}
-Intento: {intent}{url_hint}
-
-## Profilo cliente
-{client_context}
-{serp_hint}
-
-## OUTPUT atteso (JSON puro)
-{{
-  "h1": "H1 suggerito — sentence case, differenziato dai competitor, riflette il brand",
-  "outline": "## H2 principale\\n### H3 uno\\n### H3 due\\n\\n## H2 secondo\\n### H3 uno\\n...",
-  "faq_domande": [
-    "Domanda 1?",
-    "Domanda 2?",
-    "Domanda 3?",
-    "Domanda 4?",
-    "Domanda 5?",
-    "Domanda 6?",
-    "Domanda 7?",
-    "Domanda 8?"
-  ]
-}}
-
-Regole:
-- h1: unico, sentence case, riflette l'angolo del cliente
-- outline: max 6 H2, ogni H2 con 2-3 H3, in italiano, sentence case, formato markdown
-- faq_domande: esattamente 8 domande reali del target, in italiano
-- Rispondi SOLO con il JSON, nessun testo prima o dopo"""
-
-    resp = await openai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
+    competitor_json = json.dumps(
+        [
+            {
+                "url":        c.get("url", ""),
+                "h1":         truncate(c.get("h1", ""), 120),
+                "h2":         [truncate(h, 90) for h in (c.get("h2") or [])[:8]],
+                "bullets":    [truncate(b, 120) for b in (c.get("bullets") or [])[:10]],
+                "word_count": c.get("word_count", 0),
+                "text_sample": truncate(c.get("text_sample", ""), 600),
+            }
+            for c in competitor_block[:6]
         ],
-        temperature=0.3,
-        response_format={"type": "json_object"},
+        ensure_ascii=False,
+        indent=2,
     )
 
-    raw = resp.choices[0].message.content.strip()
+    url_line  = f"\nURL pagina: {page_url}" if page_url else ""
+    brand_str  = ", ".join(brands[:20])  if brands  else "non disponibili"
+    filter_str = ", ".join(filters[:20]) if filters else "non disponibili"
+    avg_wc_str = str(avg_wc) if avg_wc > 0 else "non disponibile"
+
+    user_prompt = f"""Brand: {client_name}
+Sito: {client_url}{url_line}
+Query obiettivo: "{keyword}"
+Tone of voice: {tone_of_voice}
+USP: {usp}
+
+Dati pagina Rexel:
+- marche principali: {brand_str}
+- filtri (facet): {filter_str}
+
+Dati competitor:
+- media parole competitor: {avg_wc_str}
+- lunghezza consigliata: {target_range}
+- competitor (json): {competitor_json}
+
+VINCOLI:
+- H1: basato sulla query, sentence case
+- Outline: max {max_h2} H2, ognuno con 2-4 H3 + Nota (IT) su cosa scrivere
+  Se presenti filtri reali, usali per orientare l'outline
+- FAQ: solo domande (no risposte), 5-8 domande da buyer tecnico
+
+Rispondi SOLO con questo JSON:
+{{
+  "h1": "...",
+  "lunghezza_consigliata": "{target_range}",
+  "outline": "### H2: Titolo\\n- H3: ...\\n- Nota (IT): ...",
+  "faq_domande": "- Domanda 1?\\n- Domanda 2?"
+}}"""
+
+    async def _call(temperature: float) -> dict:
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature=temperature,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content.strip()
+        try:
+            return json.loads(raw)
+        except Exception:
+            raw = re.sub(r"^```json\s*", "", raw)
+            raw = re.sub(r"\s*```$",     "", raw)
+            return json.loads(raw)
+
     try:
-        result = json.loads(raw)
+        result = await _call(0.3)
     except Exception:
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        result = json.loads(raw)
+        result = await _call(0.0)
 
     return {
-        "h1":          result.get("h1", ""),
-        "outline":     result.get("outline", ""),
-        "faq_domande": result.get("faq_domande", []),
+        "h1":                  result.get("h1", ""),
+        "lunghezza_consigliata": result.get("lunghezza_consigliata", target_range),
+        "outline":             result.get("outline", ""),
+        "faq_domande":         result.get("faq_domande", ""),
     }

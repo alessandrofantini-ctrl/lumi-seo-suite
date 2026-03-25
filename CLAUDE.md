@@ -31,10 +31,14 @@ routers/          → HTTP endpoints organizzati per dominio
 services/         → business logic pura (no FastAPI, no Supabase — testabili in isolamento)
   openai_service.py  → prompt engineering + chiamate GPT-4o
   scraper.py         → scraping pagine web + tokenization + SERP snapshot
+                        scrape_rexel_facets(url) → { brands[], filters[] } — facets da pagina categoria Rexel
+                        scrape_competitor_for_brief(url, timeout=18) → { url, h1, h2[], h3[], bullets[], word_count, text_sample }
+                        aggregate_competitor_insights() → include avg_word_count calcolato dai competitor scrappati
   serp.py            → query SerpAPI
   gsc.py             → fetch Google Search Console ultimi 28 giorni
                         fetch_gsc_queries(site_url, days) → metriche per keyword (query)
                         fetch_gsc_page_metrics(property_url, page_url) → metriche per URL pagina
+                        fetch_gsc_site_metrics(site_url, days) → metriche aggregate intero sito { clicks, impressions, ctr, avg_position }
   dataforseo.py      → get_search_volume() — volume mensile da DataForSEO Google Ads API
 cron/             → script standalone per Render Cron Job (nessun import FastAPI)
   gsc_sync_all.py → sync GSC settimanale per tutti i clienti con gsc_property configurata
@@ -140,8 +144,8 @@ Creare file `migrations/NNN_descrizione.sql` e applicarlo manualmente in Supabas
 - Aggrega dati da `keyword_position_history` (ultimi 28gg e 28-56gg fa) e `keyword_history`
 - Campi aggiuntivi per ogni cliente rispetto ai dati base della tabella `clients`:
   - `total_keywords`, `keywords_crescita`, `keywords_calo`, `last_sync` — trend keyword (posizione vs position_prev)
-  - `clicks_curr`, `impressions_curr`, `avg_position` — metriche GSC aggregate ultimi 28gg da `keyword_position_history`
-  - `clicks_trend`, `impressions_trend` — percentuale variazione vs mese precedente (28-56gg fa); `null` se mese precedente = 0
+  - `clicks_curr`, `impressions_curr`, `avg_position` — metriche GSC aggregate reali (via `fetch_gsc_site_metrics`) se `gsc_property` configurata; altrimenti da `keyword_position_history`
+  - `clicks_trend`, `impressions_trend` — calcolati da GSC reale (28gg correnti vs 28gg precedenti isolati da 56gg cumulativi) se `gsc_property` disponibile; altrimenti da `keyword_position_history`
 - Response: `[{ ...client_fields, total_keywords, keywords_crescita, keywords_calo, last_sync, clicks_curr, impressions_curr, avg_position, clicks_trend, impressions_trend }]`
 
 ## Analisi SEO asincrona — tabella seo_jobs (routers/seo.py)
@@ -180,6 +184,49 @@ created_at, updated_at  TIMESTAMPTZ
 - Filtra per `user_id = _user["user_id"]`
 - Ordine: `created_at desc`, limit 20
 - Select: `id, keyword, market, intent, status, created_at, updated_at` (no result JSONB)
+
+## Endpoint POST /api/seo/batch-brief (routers/seo.py)
+
+### POST `/api/seo/batch-brief` — endpoint sincrono (no BackgroundTask)
+
+Protetto con `Depends(get_current_user)` + `x_openai_key` + `x_serpapi_key` header.
+
+```python
+class BatchBriefRequest(BaseModel):
+    keyword: str
+    market: str
+    intent: str
+    url: Optional[str] = None            # URL categoria (es. rexel.it/categoria/...)
+    client_id: str                        # obbligatorio
+    competitor_urls: list[str] = []      # URL competitor prioritari (prepended a SERP)
+    max_competitors: int = 5
+    margin_pct: int = 20                 # margine % su media word count
+    fallback_range: str = "550–900"
+    max_h2: int = 8
+```
+
+**Pipeline interna (in ordine):**
+1. Carica profilo cliente (`name, url, tone_of_voice, usp, products_services, notes`)
+2. Rexel facets — `scrape_rexel_facets(url)` se url contiene `rexel.it`; silenzioso su errore
+3. SERP — `get_serp_data()` con `market_params`; esclude dominio cliente; combina `competitor_urls` (prioritari) + SERP (max `max_competitors` totali, no duplicati)
+4. Scraping competitor — `scrape_competitor_for_brief()` in parallelo (`ThreadPoolExecutor(max_workers=6)`); ordina prioritari prima, poi per `word_count` desc
+5. Calcolo lunghezza:
+   ```python
+   lo = max(300, int(avg_wc * (1 + (margin_pct - 10) / 100)))
+   hi = max(lo + 150, int(avg_wc * (1 + (margin_pct + 10) / 100)))
+   target_range = f"{lo}–{hi}"  # oppure fallback_range se nessun competitor
+   ```
+6. Generazione GPT-4o — `generate_batch_brief()` con retry a temperatura 0 se JSON parse fallisce
+
+**Response:** `{ h1, lunghezza_consigliata, outline, faq_domande, avg_wc, target_range, brands_count, filters_count }`
+
+**Nota architetturale:** sincrono (non usa `BackgroundTask`) perché il frontend gestisce la sequenzialità keyword per keyword e mostra il progresso. Timeout Render ~30s per request è accettabile per una singola keyword.
+
+**System prompt dinamico — `build_batch_brief_system_prompt(client: dict)`:**
+- Base generica SEO valida per tutti i clienti (output IT, sentence case, no numeri inventati, JSON puro)
+- Se `client.notes` non è vuoto: aggiunge sezione "Istruzioni specifiche per questo cliente" in coda
+- Nessuna logica hardcoded per cliente specifico — le istruzioni custom (es. placeholder marchi `[marchio 1]`, verticale settoriale, vincoli redazionali) vivono nelle note del cliente in DB
+- Esempio: le note Rexel contengono "Non nominare marchi reali nell'outline — usa [marchio 1], [marchio 2]…" → GPT-4o le riceve e le applica senza alcuna condizione nel codice
 
 ## Endpoint PATCH /api/seo/briefs/{brief_id} (routers/seo.py)
 

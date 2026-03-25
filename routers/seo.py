@@ -267,40 +267,128 @@ async def batch_brief(
     data: BatchBriefRequest,
     _user=Depends(get_current_user),
     x_openai_key: Optional[str] = Header(default=None),
+    x_serpapi_key: Optional[str] = Header(default=None),
 ):
-    """Genera H1 + outline + 8 FAQ per una keyword singola (batch generator)."""
+    """
+    Endpoint sincrono: scraping Rexel facets + SERP + competitor scraping +
+    calcolo lunghezza + GPT-4o → { h1, lunghezza_consigliata, outline, faq_domande }.
+    """
     from services.openai_service import generate_batch_brief
+    from services.scraper import scrape_rexel_facets, scrape_competitor_for_brief
+    from services.serp import get_serp_data
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # 1 ── Profilo cliente ────────────────────────────────────────────────
     res = supabase.table("clients").select(
-        "name, tone_of_voice, usp, products_services, notes"
+        "name, url, tone_of_voice, usp, products_services, notes"
     ).eq("id", data.client_id).single().execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Cliente non trovato")
-
     cd = res.data
-    client_context_parts = [
-        f"- Cliente: {cd.get('name', '')}",
-        f"- Tone of voice: {cd.get('tone_of_voice', '')}",
-        f"- USP: {cd.get('usp', '')}",
-        f"- Prodotti/servizi: {cd.get('products_services', '')}",
-        f"- Note strategiche: {cd.get('notes', '')}",
-    ]
-    client_context = "\n".join(p for p in client_context_parts if p.split(": ", 1)[-1].strip())
 
+    # 2 ── Rexel facets (silenzioso se non rexel.it o errore) ────────────
+    rexel_data = {"brands": [], "filters": []}
+    if data.url and "rexel.it" in data.url:
+        try:
+            rexel_data = scrape_rexel_facets(data.url)
+        except Exception:
+            pass
+
+    # 3 ── SERP ───────────────────────────────────────────────────────────
+    market_params = MARKETS.get(data.market, MARKETS["🇮🇹 Italia"])
+    serp_json = get_serp_data(
+        query=data.keyword,
+        gl=market_params["gl"],
+        hl=market_params["hl"],
+        domain=market_params["domain"],
+        api_key=x_serpapi_key,
+    )
+    serp_urls: list[str] = []
+    if serp_json and "organic_results" in serp_json:
+        client_domain = ""
+        if cd.get("url"):
+            try:
+                from urllib.parse import urlparse
+                client_domain = urlparse(cd["url"]).netloc.replace("www.", "")
+            except Exception:
+                pass
+        for r in serp_json["organic_results"]:
+            link = r.get("link", "")
+            if link and (not client_domain or client_domain not in link):
+                serp_urls.append(link)
+            if len(serp_urls) >= data.max_competitors:
+                break
+
+    # Competitor prioritari prima, poi SERP (no duplicati)
+    priority_urls = [u for u in data.competitor_urls if u.strip()]
+    combined_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for u in priority_urls + serp_urls:
+        if u not in seen_urls:
+            seen_urls.add(u)
+            combined_urls.append(u)
+        if len(combined_urls) >= data.max_competitors:
+            break
+
+    # 4 ── Scraping competitor in parallelo ──────────────────────────────
+    comp_results: list[dict] = []
+    if combined_urls:
+        priority_set = set(priority_urls)
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            future_map = {
+                ex.submit(scrape_competitor_for_brief, u): u
+                for u in combined_urls
+            }
+            for fut in as_completed(future_map):
+                r = fut.result()
+                if r:
+                    comp_results.append(r)
+        # Ordina: prioritari prima, poi per word_count desc
+        comp_results.sort(
+            key=lambda x: (0 if x["url"] in priority_set else 1, -x["word_count"])
+        )
+
+    # 5 ── Calcolo lunghezza ──────────────────────────────────────────────
+    wc_list = [r["word_count"] for r in comp_results if r["word_count"] > 0]
+    if wc_list:
+        avg_wc      = int(sum(wc_list) / len(wc_list))
+        lo          = max(300, int(avg_wc * (1 + (data.margin_pct - 10) / 100)))
+        hi          = max(lo + 150, int(avg_wc * (1 + (data.margin_pct + 10) / 100)))
+        target_range = f"{lo}–{hi}"
+    else:
+        avg_wc       = 0
+        target_range = data.fallback_range
+
+    # 6 ── Generazione GPT-4o ────────────────────────────────────────────
     try:
         result = await generate_batch_brief(
             keyword=data.keyword,
             market=data.market,
             intent=data.intent,
-            client_context=client_context,
-            serp_context=data.serp_context or "",
-            url=data.url or "",
+            client_name=cd.get("name", ""),
+            client_url=cd.get("url", ""),
+            tone_of_voice=cd.get("tone_of_voice", ""),
+            usp=cd.get("usp", ""),
+            client_notes=cd.get("notes", ""),
+            brands=rexel_data["brands"],
+            filters=rexel_data["filters"],
+            competitor_block=comp_results,
+            avg_wc=avg_wc,
+            target_range=target_range,
+            max_h2=data.max_h2,
+            page_url=data.url or "",
             api_key=x_openai_key,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return result
+    return {
+        **result,
+        "avg_wc":         avg_wc,
+        "target_range":   target_range,
+        "brands_count":   len(rexel_data["brands"]),
+        "filters_count":  len(rexel_data["filters"]),
+    }
 
 
 @router.get("/briefs/{brief_id}")
@@ -330,7 +418,11 @@ class BatchBriefRequest(BaseModel):
     intent: str
     url: Optional[str] = None
     client_id: str
-    serp_context: Optional[str] = None
+    competitor_urls: list[str] = []
+    max_competitors: int = 5
+    margin_pct: int = 20
+    fallback_range: str = "550–900"
+    max_h2: int = 8
 
 
 class BriefUpdateRequest(BaseModel):
