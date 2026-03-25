@@ -203,6 +203,127 @@ def build_serp_snapshot(serp_json: dict, max_items: int) -> dict:
     return snapshot
 
 # ══════════════════════════════════════════════
+#  BATCH BRIEF — Rexel facets + competitor
+# ══════════════════════════════════════════════
+
+_COUNT_RE    = re.compile(r"\s*\(\d+\)\s*")
+_FILTER_RE   = re.compile(r"^(.+?)\s*\(\d+\)\s*$")
+_FILTER_STOP = {
+    "filtri", "mostra", "ordina per", "rilevanza", "prezzo listino",
+    "prezzo netto", "in stock", "a magazzino", "disponibile",
+    "tutti", "tutte", "altri", "altro", "vedi",
+}
+
+
+def scrape_rexel_facets(url: str) -> dict:
+    """
+    Estrae brands e filtri (facets) da una pagina categoria Rexel.
+    Ritorna { brands: list[str], filters: list[str] }.
+    Se l'URL non contiene rexel.it o lo scraping fallisce: entrambe le liste vuote.
+    """
+    if "rexel.it" not in url:
+        return {"brands": [], "filters": []}
+    try:
+        r = HTTP.get(url, headers=UA, timeout=18, allow_redirects=True)
+        if r.status_code >= 400:
+            return {"brands": [], "filters": []}
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # ── Brands ────────────────────────────────────────────────────────
+        brands: list[str] = []
+        brands_container  = soup.find(id="collapseBrands")
+        if brands_container:
+            seen: set[str] = set()
+            for el in brands_container.find_all(["a", "label", "span"]):
+                raw   = safe_text(el.get_text(" ", strip=True))
+                clean = _COUNT_RE.sub("", raw).strip()
+                key   = clean.lower()
+                if clean and len(clean) >= 2 and key not in seen:
+                    seen.add(key)
+                    brands.append(clean)
+
+        # ── Filtri ────────────────────────────────────────────────────────
+        filters: list[str] = []
+        page_text = soup.get_text("\n", strip=True)
+        lines     = [l.strip() for l in page_text.splitlines() if l.strip()]
+        in_window = False
+        for line in lines:
+            ll = line.lower()
+            if not in_window:
+                if ll == "filtri" or ll.startswith("filtri "):
+                    in_window = True
+            else:
+                if "trovati" in ll:
+                    break
+                m = _FILTER_RE.match(line)
+                if m:
+                    name = m.group(1).strip()
+                    if (
+                        len(name) >= 6
+                        and name.lower() not in _FILTER_STOP
+                        and not any(sw in name.lower() for sw in _FILTER_STOP)
+                    ):
+                        filters.append(name)
+
+        return {"brands": brands[:30], "filters": filters[:30]}
+    except Exception:
+        return {"brands": [], "filters": []}
+
+
+def scrape_competitor_for_brief(url: str, timeout: int = 18) -> dict | None:
+    """
+    Scraping leggero per competitor analysis nel batch brief.
+    Ritorna { url, h1, h2[], h3[], bullets[], word_count, text_sample } o None.
+    """
+    try:
+        r = HTTP.get(url, headers=UA, timeout=timeout, allow_redirects=True)
+        if r.status_code >= 400:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+            tag.decompose()
+        for selector in ["nav", "header", "footer", "aside", "form"]:
+            for el in soup.select(selector):
+                el.decompose()
+        for cls_pattern in ["cookie", "newsletter", "modal", "popup"]:
+            for el in soup.select(f"[class*={cls_pattern}]"):
+                el.decompose()
+
+        main = detect_main_container(soup)
+
+        h1_tag = main.find("h1")
+        h1     = safe_text(h1_tag.get_text(" ", strip=True)) if h1_tag else ""
+        h2s    = [safe_text(h.get_text(" ", strip=True)) for h in main.find_all("h2")][:30]
+        h3s    = [safe_text(h.get_text(" ", strip=True)) for h in main.find_all("h3")][:45]
+
+        bullets: list[str] = []
+        for li in main.find_all("li"):
+            text = safe_text(li.get_text(" ", strip=True))
+            if 18 <= len(text) <= 200:
+                bullets.append(text)
+            if len(bullets) >= 45:
+                break
+
+        p_text     = " ".join(safe_text(p.get_text(" ", strip=True)) for p in main.find_all("p"))
+        li_text    = " ".join(safe_text(li.get_text(" ", strip=True)) for li in main.find_all("li")[:140])
+        combined   = (p_text + " " + li_text).strip()
+        word_count = len(combined.split()) if combined else 0
+
+        return {
+            "url":         url,
+            "h1":          h1,
+            "h2":          [h for h in h2s if h],
+            "h3":          [h for h in h3s if h],
+            "bullets":     [b for b in bullets if b],
+            "word_count":  word_count,
+            "text_sample": combined[:3200],
+        }
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════
 #  AGGREGAZIONE INSIGHT COMPETITOR
 # ══════════════════════════════════════════════
 
