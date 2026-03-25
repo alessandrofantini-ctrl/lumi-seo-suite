@@ -222,6 +222,12 @@ class BatchBriefRequest(BaseModel):
 
 **Nota architetturale:** sincrono (non usa `BackgroundTask`) perché il frontend gestisce la sequenzialità keyword per keyword e mostra il progresso. Timeout Render ~30s per request è accettabile per una singola keyword.
 
+**System prompt dinamico — `build_batch_brief_system_prompt(client: dict)`:**
+- Base generica SEO valida per tutti i clienti (output IT, sentence case, no numeri inventati, JSON puro)
+- Se `client.notes` non è vuoto: aggiunge sezione "Istruzioni specifiche per questo cliente" in coda
+- Nessuna logica hardcoded per cliente specifico — le istruzioni custom (es. placeholder marchi `[marchio 1]`, verticale settoriale, vincoli redazionali) vivono nelle note del cliente in DB
+- Esempio: le note Rexel contengono "Non nominare marchi reali nell'outline — usa [marchio 1], [marchio 2]…" → GPT-4o le riceve e le applica senza alcuna condizione nel codice
+
 ## Endpoint PATCH /api/seo/briefs/{brief_id} (routers/seo.py)
 
 ### PATCH `/api/seo/briefs/{brief_id}`

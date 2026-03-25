@@ -364,6 +364,29 @@ Output: solo Markdown dell'articolo. Nessun commento, nessuna premessa.
 #  GENERAZIONE BATCH BRIEF (H1 + outline + FAQ)
 # ══════════════════════════════════════════════
 
+def build_batch_brief_system_prompt(client: dict) -> str:
+    """
+    Costruisce il system prompt GPT-4o in modo dinamico.
+    Base generica valida per tutti i clienti + istruzioni custom da client.notes.
+    Nessuna logica hardcoded per cliente specifico — le istruzioni custom
+    (es. placeholder marchi, verticale settoriale) vivono nelle note del cliente in DB.
+    """
+    base = (
+        "Sei un esperto SEO specializzato nella creazione di brief editoriali per category page. "
+        "Crei contenuti ottimizzati per buyer tecnici e utenti con alta intenzione d'acquisto.\n\n"
+        "Regole generali:\n"
+        "- Output in italiano\n"
+        "- Stile tecnico e concreto, niente fuffa\n"
+        "- Sentence case (solo prima lettera maiuscola nei titoli)\n"
+        "- Niente numeri inventati o claim non verificabili\n"
+        "- Rispondi SOLO con JSON valido, nessun testo prima o dopo, nessun backtick markdown"
+    )
+    notes = (client.get("notes") or "").strip()
+    if notes:
+        base += f"\n\nIstruzioni specifiche per questo cliente:\n{notes}"
+    return base
+
+
 async def generate_batch_brief(
     keyword: str,
     market: str,
@@ -372,6 +395,7 @@ async def generate_batch_brief(
     client_url: str,
     tone_of_voice: str,
     usp: str,
+    client_notes: str,
     brands: list[str],
     filters: list[str],
     competitor_block: list[dict],
@@ -386,6 +410,7 @@ async def generate_batch_brief(
     Ritorna { h1, lunghezza_consigliata, outline, faq_domande }.
     """
     openai_client = _openai_client(api_key)
+    system_prompt  = build_batch_brief_system_prompt({"notes": client_notes})
 
     competitor_json = json.dumps(
         [
@@ -401,13 +426,6 @@ async def generate_batch_brief(
         ],
         ensure_ascii=False,
         indent=2,
-    )
-
-    system_prompt = (
-        "Sei un senior SEO e-commerce B2B specializzato in materiale elettrico. "
-        "Crei spunti operativi per testi di categoria (category page) destinati a buyer tecnici. "
-        "Regole: output in italiano, stile tecnico e concreto, sentence case, niente numeri inventati. "
-        "Rispondi SOLO con JSON valido, nessun testo prima o dopo, nessun backtick markdown."
     )
 
     url_line  = f"\nURL pagina: {page_url}" if page_url else ""

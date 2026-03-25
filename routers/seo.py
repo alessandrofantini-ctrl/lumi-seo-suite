@@ -369,6 +369,7 @@ async def batch_brief(
             client_url=cd.get("url", ""),
             tone_of_voice=cd.get("tone_of_voice", ""),
             usp=cd.get("usp", ""),
+            client_notes=cd.get("notes", ""),
             brands=rexel_data["brands"],
             filters=rexel_data["filters"],
             competitor_block=comp_results,
