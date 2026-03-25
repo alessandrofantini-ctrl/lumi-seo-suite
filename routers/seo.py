@@ -37,6 +37,23 @@ class SeoAnalysisRequest(BaseModel):
     include_schema: Optional[bool] = True
     save_brief: Optional[bool] = True
 
+
+class BatchBriefRequest(BaseModel):
+    keyword: str
+    market: str
+    intent: str
+    url: Optional[str] = None
+    client_id: str
+    competitor_urls: list[str] = []
+    max_competitors: int = 5
+    margin_pct: int = 20
+    fallback_range: str = "550–900"
+    max_h2: int = 8
+
+
+class BriefUpdateRequest(BaseModel):
+    brief_output: str
+
 # ══════════════════════════════════════════════
 #  LOGICA ANALISI — eseguita in background
 # ══════════════════════════════════════════════
@@ -410,23 +427,6 @@ def get_all_briefs(client_id: Optional[str] = None, _user=Depends(get_current_us
         query = query.eq("client_id", client_id)
     res = query.order("created_at", desc=True).limit(50).execute()
     return res.data
-
-
-class BatchBriefRequest(BaseModel):
-    keyword: str
-    market: str
-    intent: str
-    url: Optional[str] = None
-    client_id: str
-    competitor_urls: list[str] = []
-    max_competitors: int = 5
-    margin_pct: int = 20
-    fallback_range: str = "550–900"
-    max_h2: int = 8
-
-
-class BriefUpdateRequest(BaseModel):
-    brief_output: str
 
 
 @router.patch("/briefs/{brief_id}")
