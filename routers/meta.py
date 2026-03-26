@@ -27,8 +27,8 @@ def _openai_client(api_key: str | None = None) -> AsyncOpenAI:
 
 def _slugify(name: str) -> str:
     """Converte nome pagina in slug URL."""
-    # Gestisce il separatore "–" o "-" per sotto-pagine
-    parts = re.split(r"\s*[–-]\s*", name, maxsplit=1)
+    # Normalizza sia em dash – che trattino -
+    parts = re.split(r"\s*[–\-]\s*", name, maxsplit=1)
     segments = []
     for part in parts:
         slug = part.strip().lower()
@@ -42,6 +42,46 @@ def _slugify(name: str) -> str:
     return "/" + (segments[0] if segments else "")
 
 
+_SKIP_NAMES = {
+    "URL", "TITLE", "DESCRIPTION", "H1", "H2", "H3",
+    "INVIA", "CHIAMACI", "NOTE", "--",
+}
+
+
+def _is_page_name(para) -> bool:
+    """
+    Un nome pagina è un paragrafo tutto maiuscolo con almeno un run in grassetto.
+    CTA e label (INVIA, CHIAMACI, DISPLAY PRODOTTI, URL:, H1:, ...) non sono in grassetto
+    quindi vengono esclusi automaticamente.
+    """
+    text = para.text.strip()
+    if not text:
+        return False
+
+    # Deve avere almeno un carattere alfabetico
+    if not re.search(r"[A-Z]", text):
+        return False
+
+    # Tutto maiuscolo (permettiamo –, -, spazi, numeri, punteggiatura)
+    letters = re.sub(r"[^a-zA-Z]", "", text)
+    if not letters or letters != letters.upper():
+        return False
+
+    # Deve avere almeno un run in grassetto
+    if not any(run.bold for run in para.runs if run.text.strip()):
+        return False
+
+    # Escludi label e nomi riservati
+    if any(text.upper().startswith(s + ":") for s in _SKIP_NAMES):
+        return False
+    if text.upper() in _SKIP_NAMES:
+        return False
+    if text.startswith("HTTP") or text.upper().startswith("URL"):
+        return False
+
+    return True
+
+
 def _parse_sections(doc: Document) -> list[dict]:
     """Estrae sezioni pagina dal documento .docx."""
     pages: list[dict] = []
@@ -49,17 +89,7 @@ def _parse_sections(doc: Document) -> list[dict]:
     current_url: str = ""
     current_lines: list[str] = []
 
-    # Parole da ignorare come nome pagina
-    SKIP_NAMES = {
-        "INVIA", "CONTATTI FORM",
-        "TITLE", "TITLE:", "DESCRIPTION", "DESCRIPTION:",
-        "H1", "H1:", "H2", "H2:", "H3", "H3:",
-        "SLOGAN", "SLOGAN:",
-        "URL", "URL:",
-        "NOTE", "NOTE:",
-        "--",
-    }
-
+    # Safety net: salta il primo elemento bold-caps se è il titolo globale del documento
     first_skipped = False
 
     for para in doc.paragraphs:
@@ -67,49 +97,43 @@ def _parse_sections(doc: Document) -> list[dict]:
         if not text:
             continue
 
-        # Rileva nome pagina: testo tutto maiuscolo (min 2 char, non URL, non label)
-        is_page_name = (
-            text == text.upper()
-            and len(text) >= 2
-            and not text.startswith("URL")
-            and not text.startswith("HTTP")
-            and not text.endswith(":")
-            and not re.match(r"^[A-Z]{1,3}:\\", text)
-            and text not in SKIP_NAMES
-            # non è solo simboli o numeri
-            and re.search(r"[A-Z]", text)
-        )
-
-        if is_page_name:
-            # Salta il primo nome-pagina (titolo globale del documento)
+        if _is_page_name(para):
             if not first_skipped:
                 first_skipped = True
                 continue
-            # Salva pagina precedente
-            if current_page and current_page not in SKIP_NAMES:
-                pages.append({
-                    "page": current_page,
-                    "url": current_url or _slugify(current_page),
-                    "content": " ".join(current_lines).strip(),
-                })
+            if current_page:
+                content = " ".join(current_lines).strip()
+                if len(content) >= 30:
+                    pages.append({
+                        "page": current_page,
+                        "url": current_url or _slugify(current_page),
+                        "content": content,
+                    })
             current_page = text
             current_url = ""
             current_lines = []
 
-        elif text.upper().startswith("URL:") or text.upper().startswith("URL :"):
+        elif re.match(r"(?i)^url\s*:", text):
             raw_url = re.sub(r"(?i)^url\s*:", "", text).strip()
             current_url = raw_url if raw_url else _slugify(current_page or "")
+
+        elif re.match(r"(?i)^(title|description|h[1-6])\s*:", text):
+            value = re.sub(r"(?i)^[^:]+:\s*", "", text).strip()
+            if value:
+                current_lines.append(value)
 
         else:
             current_lines.append(text)
 
     # Ultima pagina
-    if current_page and current_page not in SKIP_NAMES:
-        pages.append({
-            "page": current_page,
-            "url": current_url or _slugify(current_page),
-            "content": " ".join(current_lines).strip(),
-        })
+    if current_page:
+        content = " ".join(current_lines).strip()
+        if len(content) >= 30:
+            pages.append({
+                "page": current_page,
+                "url": current_url or _slugify(current_page),
+                "content": content,
+            })
 
     return pages
 
