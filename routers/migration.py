@@ -2,9 +2,10 @@ import csv
 import io
 import json
 import re
+import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
@@ -12,6 +13,9 @@ from openai import AsyncOpenAI
 from auth import get_current_user
 
 router = APIRouter()
+
+# In-memory job store — job_id → { status, result, error }
+_migration_jobs: dict[str, dict] = {}
 
 # ══════════════════════════════════════════════
 #  MODELLI
@@ -384,26 +388,222 @@ async def _match_pages(
 
 
 # ══════════════════════════════════════════════
+#  BACKGROUND TASK — logica di matching
+# ══════════════════════════════════════════════
+
+async def _run_migration(
+    job_id: str,
+    old_pages_raw: list[dict],
+    new_pages_by_domain_id: dict[str, list[dict]],
+    domain_info_by_id: dict[str, dict],
+    new_domains_cfg: list[dict],
+    language_rules: list[dict],
+    x_openai_key: str,
+):
+    """Esegue matching in background e salva il risultato in _migration_jobs."""
+    try:
+        # Mappa inversa address → domain_id
+        url_to_domain_id: dict[str, str] = {}
+        for domain_id, pages in new_pages_by_domain_id.items():
+            for p in pages:
+                url_to_domain_id[p["address"]] = domain_id
+
+        # Pool combinato
+        all_new_pages: list[dict] = []
+        for pages in new_pages_by_domain_id.values():
+            all_new_pages.extend(pages)
+
+        def _annotate(r: dict) -> dict:
+            new_url = r.get("new_url")
+            if new_url:
+                did = url_to_domain_id.get(new_url)
+                info = domain_info_by_id.get(did, {}) if did else {}
+                r["target_domain"] = info.get("domain")
+                r["target_label"] = info.get("label")
+            else:
+                r["target_domain"] = None
+                r["target_label"] = None
+            return r
+
+        all_results: list[dict] = []
+        all_stats: dict[str, int] = {
+            "exact": 0, "slug": 0, "gpt": 0,
+            "no_match": 0, "eliminated": 0, "consolidated": 0, "homepage": 0,
+        }
+
+        if not language_rules:
+            old_pages = [{**p, "match_slug": p["address"]} for p in old_pages_raw]
+            match_results, stats = await _match_pages(old_pages, all_new_pages, x_openai_key)
+            for r in match_results:
+                _annotate(r)
+            all_results = match_results
+            for k in ("exact", "slug", "gpt", "no_match"):
+                all_stats[k] += stats.get(k, 0)
+
+        else:
+            rule_buckets: dict[int, list[dict]] = {}
+            fallback_bucket: list[dict] = []
+
+            for p in old_pages_raw:
+                matched_idx = next(
+                    (i for i, rule in enumerate(language_rules) if _url_matches_rule(p["address"], rule)),
+                    None,
+                )
+                if matched_idx is not None:
+                    rule_buckets.setdefault(matched_idx, []).append(p)
+                else:
+                    fallback_bucket.append(p)
+
+            for rule_idx, rule in enumerate(language_rules):
+                rule_pages = rule_buckets.get(rule_idx, [])
+                if not rule_pages:
+                    continue
+
+                behavior: str = rule.get("behavior", "redirect")
+                pattern: str = rule.get("pattern", "")
+                pattern_type: str = rule.get("pattern_type", "subdirectory")
+                target_domain_id: str = rule.get("target_domain_id", "")
+                consolidated_domain_id: str = rule.get("consolidated_target_domain_id", "")
+
+                if pattern_type == "subdirectory" and pattern:
+                    old_pages_with_ms = [
+                        {**p, "match_slug": _strip_lang_prefix(p["address"], pattern)}
+                        for p in rule_pages
+                    ]
+                else:
+                    old_pages_with_ms = [{**p, "match_slug": p["address"]} for p in rule_pages]
+
+                if behavior == "eliminated":
+                    for op in old_pages_with_ms:
+                        all_results.append({
+                            "old_url": op["address"],
+                            "old_title": op["title"],
+                            "old_h1": op["h1"],
+                            "old_inlinks": op["inlinks"],
+                            "new_url": None,
+                            "new_title": None,
+                            "target_domain": None,
+                            "target_label": None,
+                            "confidence": 0,
+                            "match_type": "eliminated",
+                            "reason": "Lingua eliminata — nessun redirect",
+                        })
+                    all_stats["eliminated"] += len(rule_pages)
+                    continue
+
+                effective_id = consolidated_domain_id if behavior == "consolidated" else target_domain_id
+                target_new_pages = new_pages_by_domain_id.get(effective_id, [])
+                target_info = domain_info_by_id.get(effective_id, {})
+
+                if not target_new_pages:
+                    for op in old_pages_with_ms:
+                        all_results.append({
+                            "old_url": op["address"],
+                            "old_title": op["title"],
+                            "old_h1": op["h1"],
+                            "old_inlinks": op["inlinks"],
+                            "new_url": None,
+                            "new_title": None,
+                            "target_domain": None,
+                            "target_label": None,
+                            "confidence": 0,
+                            "match_type": "no_match",
+                            "reason": "Nessun CSV per il dominio di destinazione",
+                        })
+                    all_stats["no_match"] += len(rule_pages)
+                    continue
+
+                match_results, rule_stats = await _match_pages(
+                    old_pages_with_ms, target_new_pages, x_openai_key
+                )
+
+                rule_matched = rule_stats["exact"] + rule_stats["slug"] + rule_stats["gpt"]
+                for r in match_results:
+                    r["target_domain"] = target_info.get("domain") if r.get("new_url") else None
+                    r["target_label"] = target_info.get("label") if r.get("new_url") else None
+                    if behavior == "consolidated" and r["match_type"] not in ("no_match",):
+                        r["match_type"] = "consolidated"
+
+                all_results.extend(match_results)
+
+                if behavior == "consolidated":
+                    all_stats["consolidated"] += rule_matched
+                else:
+                    for k in ("exact", "slug", "gpt"):
+                        all_stats[k] += rule_stats.get(k, 0)
+                all_stats["no_match"] += rule_stats.get("no_match", 0)
+
+            if fallback_bucket:
+                fb_pages = [{**p, "match_slug": p["address"]} for p in fallback_bucket]
+                fb_results, fb_stats = await _match_pages(fb_pages, all_new_pages, x_openai_key)
+                for r in fb_results:
+                    _annotate(r)
+                all_results.extend(fb_results)
+                for k in ("exact", "slug", "gpt", "no_match"):
+                    all_stats[k] += fb_stats.get(k, 0)
+
+        # Homepage fallback
+        fallback_url = None
+        fallback_domain = None
+        fallback_label = None
+        if new_domains_cfg:
+            base = new_domains_cfg[0].get("domain", "").rstrip("/")
+            if base:
+                fallback_url = base + "/"
+                fallback_domain = base
+                fallback_label = new_domains_cfg[0].get("label", "")
+
+        if fallback_url:
+            for r in all_results:
+                if r.get("match_type") == "no_match":
+                    r["new_url"] = fallback_url
+                    r["match_type"] = "homepage"
+                    r["reason"] = "Nessuna corrispondenza — redirect alla homepage"
+                    r["target_domain"] = fallback_domain
+                    r["target_label"] = fallback_label
+
+        all_stats["homepage"] = sum(1 for r in all_results if r.get("match_type") == "homepage")
+        all_stats["no_match"] = sum(1 for r in all_results if r.get("match_type") == "no_match")
+
+        matched = (
+            all_stats["exact"]
+            + all_stats["slug"]
+            + all_stats["gpt"]
+            + all_stats["consolidated"]
+        )
+
+        _migration_jobs[job_id] = {
+            "status": "done",
+            "result": {
+                "total": len(all_results),
+                "matched": matched,
+                "no_match": all_stats["no_match"],
+                "eliminated": all_stats["eliminated"],
+                "homepage": all_stats["homepage"],
+                "results": all_results,
+                "stats": all_stats,
+            },
+            "error": None,
+        }
+
+    except Exception as e:
+        _migration_jobs[job_id] = {"status": "error", "result": None, "error": str(e)}
+
+
+# ══════════════════════════════════════════════
 #  ENDPOINT — analisi migrazione
 # ══════════════════════════════════════════════
 
 @router.post("/analyze")
 async def analyze_migration(
     request: Request,
+    background_tasks: BackgroundTasks,
     _user=Depends(get_current_user),
     x_openai_key: Optional[str] = Header(default=None),
 ):
     """
-    Analizza CSV Screaming Frog e genera mapping redirect 301.
-
-    Multipart form-data:
-      config           — JSON: { old_domain, new_domains: [{id, domain, label}], language_rules: [...] }
-      old_csv          — CSV Screaming Frog sito vecchio (1 file con tutti gli URL)
-      new_csv_{id}     — CSV per ogni new_domain (es. new_csv_uuid-1)
-
-    Matching logic:
-      - Se language_rules è vuoto: cerca su tutti i CSV new combinati
-      - Se language_rules configurato: routing per regola, fallback su tutti i CSV
+    Avvia l'analisi CSV in background e restituisce subito un job_id.
+    Usa GET /status/{job_id} per il polling dello stato.
     """
     if not x_openai_key:
         raise HTTPException(status_code=400, detail="API key OpenAI mancante (header X-OpenAI-Key)")
@@ -419,11 +619,10 @@ async def analyze_migration(
         raise HTTPException(status_code=400, detail="Campo 'config' non è JSON valido")
 
     old_domain = config.get("old_domain", "").rstrip("/")
-    new_domains_cfg = config.get("new_domains", [])   # [{id, domain, label}]
-    language_rules = config.get("language_rules", []) # [{pattern, pattern_type, target_domain_id, behavior, ...}]
+    new_domains_cfg = config.get("new_domains", [])
+    language_rules = config.get("language_rules", [])
 
-    # ── Parsing CSV vecchio ──────────────────────────────────────────────────
-
+    # Parsing CSV vecchio
     old_csv_file = form.get("old_csv")
     if not old_csv_file or not hasattr(old_csv_file, "read"):
         raise HTTPException(status_code=400, detail="Campo 'old_csv' mancante")
@@ -437,11 +636,8 @@ async def analyze_migration(
             detail="CSV sito vecchio vuoto o non valido (nessuna pagina HTML 200)",
         )
 
-    # ── Parsing CSV nuovi (uno per dominio) ─────────────────────────────────
-
-    # domain_info_by_id: id → {domain, label}
+    # Parsing CSV nuovi
     domain_info_by_id: dict[str, dict] = {}
-    # new_pages_by_domain_id: id → lista pagine con match_slug
     new_pages_by_domain_id: dict[str, list[dict]] = {}
 
     for nd in new_domains_cfg:
@@ -460,13 +656,6 @@ async def analyze_migration(
             {**p, "match_slug": p["address"]} for p in raw_pages
         ]
 
-    # Mappa inversa address → domain_id (per risolvere target dopo il matching)
-    url_to_domain_id: dict[str, str] = {}
-    for domain_id, pages in new_pages_by_domain_id.items():
-        for p in pages:
-            url_to_domain_id[p["address"]] = domain_id
-
-    # Pool combinato di tutte le pagine nuove (per matching senza regole o fallback)
     all_new_pages: list[dict] = []
     for pages in new_pages_by_domain_id.values():
         all_new_pages.extend(pages)
@@ -474,186 +663,41 @@ async def analyze_migration(
     if not all_new_pages:
         raise HTTPException(status_code=400, detail="Nessun CSV sito nuovo valido caricato")
 
-    # ── Helper: annota risultati con target_domain/target_label ─────────────
+    # Avvia background task
+    job_id = str(uuid.uuid4())
+    _migration_jobs[job_id] = {"status": "running", "result": None, "error": None}
 
-    def _annotate(r: dict) -> dict:
-        new_url = r.get("new_url")
-        if new_url:
-            did = url_to_domain_id.get(new_url)
-            info = domain_info_by_id.get(did, {}) if did else {}
-            r["target_domain"] = info.get("domain")
-            r["target_label"] = info.get("label")
-        else:
-            r["target_domain"] = None
-            r["target_label"] = None
-        return r
-
-    # ── Matching ─────────────────────────────────────────────────────────────
-
-    all_results: list[dict] = []
-    all_stats: dict[str, int] = {
-        "exact": 0, "slug": 0, "gpt": 0,
-        "no_match": 0, "eliminated": 0, "consolidated": 0, "homepage": 0,
-    }
-
-    if not language_rules:
-        # Nessuna regola: cerca su tutti i CSV combinati
-        old_pages = [{**p, "match_slug": p["address"]} for p in old_pages_raw]
-        match_results, stats = await _match_pages(old_pages, all_new_pages, x_openai_key)
-        for r in match_results:
-            _annotate(r)
-        all_results = match_results
-        for k in ("exact", "slug", "gpt", "no_match"):
-            all_stats[k] += stats.get(k, 0)
-
-    else:
-        # Routing per regola
-        # Step 1: assegna ogni old page a una regola (prima che matcha vince) o fallback
-        rule_buckets: dict[int, list[dict]] = {}
-        fallback_bucket: list[dict] = []
-
-        for p in old_pages_raw:
-            matched_idx = next(
-                (i for i, rule in enumerate(language_rules) if _url_matches_rule(p["address"], rule)),
-                None,
-            )
-            if matched_idx is not None:
-                rule_buckets.setdefault(matched_idx, []).append(p)
-            else:
-                fallback_bucket.append(p)
-
-        # Step 2: processa ogni regola
-        for rule_idx, rule in enumerate(language_rules):
-            rule_pages = rule_buckets.get(rule_idx, [])
-            if not rule_pages:
-                continue
-
-            behavior: str = rule.get("behavior", "redirect")
-            pattern: str = rule.get("pattern", "")
-            pattern_type: str = rule.get("pattern_type", "subdirectory")
-            target_domain_id: str = rule.get("target_domain_id", "")
-            consolidated_domain_id: str = rule.get("consolidated_target_domain_id", "")
-
-            # Calcola match_slug: strip prefisso subdirectory per old pages
-            if pattern_type == "subdirectory" and pattern:
-                old_pages_with_ms = [
-                    {**p, "match_slug": _strip_lang_prefix(p["address"], pattern)}
-                    for p in rule_pages
-                ]
-            else:
-                old_pages_with_ms = [{**p, "match_slug": p["address"]} for p in rule_pages]
-
-            # Lingua eliminata
-            if behavior == "eliminated":
-                for op in old_pages_with_ms:
-                    all_results.append({
-                        "old_url": op["address"],
-                        "old_title": op["title"],
-                        "old_h1": op["h1"],
-                        "old_inlinks": op["inlinks"],
-                        "new_url": None,
-                        "new_title": None,
-                        "target_domain": None,
-                        "target_label": None,
-                        "confidence": 0,
-                        "match_type": "eliminated",
-                        "reason": "Lingua eliminata — nessun redirect",
-                    })
-                all_stats["eliminated"] += len(rule_pages)
-                continue
-
-            # Determina quale pool di pagine nuove usare
-            effective_id = consolidated_domain_id if behavior == "consolidated" else target_domain_id
-            target_new_pages = new_pages_by_domain_id.get(effective_id, [])
-            target_info = domain_info_by_id.get(effective_id, {})
-
-            if not target_new_pages:
-                for op in old_pages_with_ms:
-                    all_results.append({
-                        "old_url": op["address"],
-                        "old_title": op["title"],
-                        "old_h1": op["h1"],
-                        "old_inlinks": op["inlinks"],
-                        "new_url": None,
-                        "new_title": None,
-                        "target_domain": None,
-                        "target_label": None,
-                        "confidence": 0,
-                        "match_type": "no_match",
-                        "reason": "Nessun CSV per il dominio di destinazione",
-                    })
-                all_stats["no_match"] += len(rule_pages)
-                continue
-
-            match_results, rule_stats = await _match_pages(
-                old_pages_with_ms, target_new_pages, x_openai_key
-            )
-
-            rule_matched = rule_stats["exact"] + rule_stats["slug"] + rule_stats["gpt"]
-            for r in match_results:
-                r["target_domain"] = target_info.get("domain") if r.get("new_url") else None
-                r["target_label"] = target_info.get("label") if r.get("new_url") else None
-                if behavior == "consolidated" and r["match_type"] not in ("no_match",):
-                    r["match_type"] = "consolidated"
-
-            all_results.extend(match_results)
-
-            if behavior == "consolidated":
-                all_stats["consolidated"] += rule_matched
-            else:
-                for k in ("exact", "slug", "gpt"):
-                    all_stats[k] += rule_stats.get(k, 0)
-            all_stats["no_match"] += rule_stats.get("no_match", 0)
-
-        # Step 3: fallback — pagine senza regola → cerca su tutti i CSV combinati
-        if fallback_bucket:
-            fb_pages = [{**p, "match_slug": p["address"]} for p in fallback_bucket]
-            fb_results, fb_stats = await _match_pages(fb_pages, all_new_pages, x_openai_key)
-            for r in fb_results:
-                _annotate(r)
-            all_results.extend(fb_results)
-            for k in ("exact", "slug", "gpt", "no_match"):
-                all_stats[k] += fb_stats.get(k, 0)
-
-    # ── Homepage fallback — converte no_match in redirect alla homepage ──────
-    fallback_url = None
-    fallback_domain = None
-    fallback_label = None
-    if new_domains_cfg:
-        base = new_domains_cfg[0].get("domain", "").rstrip("/")
-        if base:
-            fallback_url = base + "/"
-            fallback_domain = base
-            fallback_label = new_domains_cfg[0].get("label", "")
-
-    if fallback_url:
-        for r in all_results:
-            if r.get("match_type") == "no_match":
-                r["new_url"]    = fallback_url
-                r["match_type"] = "homepage"
-                r["reason"]     = "Nessuna corrispondenza — redirect alla homepage"
-                r["target_domain"] = fallback_domain
-                r["target_label"]  = fallback_label
-
-    all_stats["homepage"]  = sum(1 for r in all_results if r.get("match_type") == "homepage")
-    all_stats["no_match"]  = sum(1 for r in all_results if r.get("match_type") == "no_match")
-
-    matched = (
-        all_stats["exact"]
-        + all_stats["slug"]
-        + all_stats["gpt"]
-        + all_stats["consolidated"]
+    background_tasks.add_task(
+        _run_migration,
+        job_id,
+        old_pages_raw,
+        new_pages_by_domain_id,
+        domain_info_by_id,
+        new_domains_cfg,
+        language_rules,
+        x_openai_key,
     )
 
-    return {
-        "total": len(all_results),
-        "matched": matched,
-        "no_match": all_stats["no_match"],
-        "eliminated": all_stats["eliminated"],
-        "homepage": all_stats["homepage"],
-        "results": all_results,
-        "stats": all_stats,
-    }
+    return {"job_id": job_id}
+
+
+@router.get("/status/{job_id}")
+async def migration_status(job_id: str, _user=Depends(get_current_user)):
+    """Polling stato job migrazione."""
+    job = _migration_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job non trovato")
+
+    if job["status"] == "running":
+        return {"status": "running"}
+
+    if job["status"] == "error":
+        return {"status": "error", "detail": job["error"]}
+
+    # done — consegna risultato e libera memoria
+    result = job["result"]
+    del _migration_jobs[job_id]
+    return {"status": "done", **result}
 
 
 # ══════════════════════════════════════════════
